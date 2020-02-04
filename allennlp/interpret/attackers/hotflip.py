@@ -110,7 +110,6 @@ class Hotflip(Attacker):
 
         # pass all tokens through the fake matrix and create an embedding out of it.
         embedding_matrix = embedding_layer(inputs).squeeze()
-
         return embedding_matrix
 
     def _make_embedder_input(self, all_tokens: List[str]) -> Dict[str, torch.Tensor]:
@@ -127,7 +126,7 @@ class Hotflip(Attacker):
                 tokens = [Token(x) for x in all_tokens]
                 max_token_length = max(len(x) for x in all_tokens)
                 # sometime max_token_length is too short for cnn encoder
-                max_token_length = max(max_token_length, token_indexer._min_padding_length)
+                max_token_length = max(max_token_length, 3)
                 indexed_tokens = token_indexer.tokens_to_indices(
                     tokens, self.vocab, "token_characters"
                 )
@@ -202,120 +201,122 @@ class Hotflip(Attacker):
         # _towards_ the target.
         sign = -1 if target is None else 1
         instance = self.predictor._json_to_instance(inputs)
-        if target is None:
-            output_dict = self.predictor._model.forward_on_instance(instance)
-        else:
-            output_dict = target
+        #         if target is None:
+        #             output_dict = self.predictor._model.forward_on_instance(instance)
+        #         else:
+        #             output_dict = target
 
-        # This now holds the predictions that we want to change (either away from or towards,
-        # depending on whether `target` was passed).  We'll use this in the loop below to check for
-        # when we've met our stopping criterion.
-        original_instances = self.predictor.predictions_to_labeled_instances(instance, output_dict)
+        #         # This now holds the predictions that we want to change (either away from or towards,
+        #         # depending on whether `target` was passed).  We'll use this in the loop below to check for
+        #         # when we've met our stopping criterion.
+        #         original_instances = self.predictor.predictions_to_labeled_instances(instance, output_dict)
 
-        # This is just for ease of access in the UI, so we know the original tokens.  It's not used
-        # in the logic below.
-        original_text_field: TextField = original_instances[0][  # type: ignore
-            input_field_to_attack
-        ]
-        original_tokens = deepcopy(original_text_field.tokens)
+        #         # This is just for ease of access in the UI, so we know the original tokens.  It's not used
+        #         # in the logic below.
+        #         original_text_field: TextField = original_instances[0][  # type: ignore
+        #             input_field_to_attack
+        #         ]
+        #         original_tokens = deepcopy(original_text_field.tokens)
 
-        final_tokens = []
-        # `original_instances` is a list because there might be several different predictions that
-        # we're trying to attack (e.g., all of the NER tags for an input sentence).  We attack them
-        # one at a time.
-        for instance in original_instances:
-            # Gets a list of the fields that we want to check to see if they change.
-            fields_to_compare = utils.get_fields_to_compare(inputs, instance, input_field_to_attack)
+        #         final_tokens = []
+        #         # `original_instances` is a list because there might be several different predictions that
+        #         # we're trying to attack (e.g., all of the NER tags for an input sentence).  We attack them
+        #         # one at a time.
+        #         for instance in original_instances:
+        #             # Gets a list of the fields that we want to check to see if they change.
+        #             fields_to_compare = utils.get_fields_to_compare(inputs, instance, input_field_to_attack)
 
-            # We'll be modifying the tokens in this text field below, and grabbing the modified
-            # list after the `while` loop.
-            text_field: TextField = instance[input_field_to_attack]  # type: ignore
+        #             # We'll be modifying the tokens in this text field below, and grabbing the modified
+        #             # list after the `while` loop.
+        #             text_field: TextField = instance[input_field_to_attack]  # type: ignore
 
-            # Because we can save computation by getting grads and outputs at the same time, we do
-            # them together at the end of the loop, even though we use grads at the beginning and
-            # outputs at the end.  This is our initial gradient for the beginning of the loop.  The
-            # output can be ignored here.
-            grads, outputs = self.predictor.get_gradients([instance])
+        #             # Because we can save computation by getting grads and outputs at the same time, we do
+        #             # them together at the end of the loop, even though we use grads at the beginning and
+        #             # outputs at the end.  This is our initial gradient for the beginning of the loop.  The
+        #             # output can be ignored here.
+        #             grads, outputs = self.predictor.get_gradients([instance])
 
-            # Ignore any token that is in the ignore_tokens list by setting the token to already
-            # flipped.
-            flipped: List[int] = []
-            for index, token in enumerate(text_field.tokens):
-                if token.text in ignore_tokens:
-                    flipped.append(index)
-            if "clusters" in outputs:
-                # Coref unfortunately needs a special case here.  We don't want to flip words in
-                # the same predicted coref cluster, but we can't really specify a list of tokens,
-                # because, e.g., "he" could show up in several different clusters.
-                # TODO(mattg): perhaps there's a way to get `predictions_to_labeled_instances` to
-                # return the set of tokens that shouldn't be changed for each instance?  E.g., you
-                # could imagine setting a field on the `Token` object, that we could then read
-                # here...
-                for cluster in outputs["clusters"]:
-                    for mention in cluster:
-                        for index in range(mention[0], mention[1] + 1):
-                            flipped.append(index)
+        #             # Ignore any token that is in the ignore_tokens list by setting the token to already
+        #             # flipped.
+        #             flipped: List[int] = []
+        #             for index, token in enumerate(text_field.tokens):
+        #                 if token.text in ignore_tokens:
+        #                     flipped.append(index)
+        #             if "clusters" in outputs:
+        #                 # Coref unfortunately needs a special case here.  We don't want to flip words in
+        #                 # the same predicted coref cluster, but we can't really specify a list of tokens,
+        #                 # because, e.g., "he" could show up in several different clusters.
+        #                 # TODO(mattg): perhaps there's a way to get `predictions_to_labeled_instances` to
+        #                 # return the set of tokens that shouldn't be changed for each instance?  E.g., you
+        #                 # could imagine setting a field on the `Token` object, that we could then read
+        #                 # here...
+        #                 for cluster in outputs["clusters"]:
+        #                     for mention in cluster:
+        #                         for index in range(mention[0], mention[1] + 1):
+        #                             flipped.append(index)
 
-            while True:
-                # Compute L2 norm of all grads.
-                grad = grads[grad_input_field][0]
-                grads_magnitude = [g.dot(g) for g in grad]
+        #             while True:
+        #                 # Compute L2 norm of all grads.
+        #                 grad = grads[grad_input_field][0]
+        #                 grads_magnitude = [g.dot(g) for g in grad]
 
-                # only flip a token once
-                for index in flipped:
-                    grads_magnitude[index] = -1
+        #                 # only flip a token once
+        #                 for index in flipped:
+        #                     grads_magnitude[index] = -1
 
-                # We flip the token with highest gradient norm.
-                index_of_token_to_flip = numpy.argmax(grads_magnitude)
-                if grads_magnitude[index_of_token_to_flip] == -1:
-                    # If we've already flipped all of the tokens, we give up.
-                    break
-                flipped.append(index_of_token_to_flip)
+        #                 # We flip the token with highest gradient norm.
+        #                 index_of_token_to_flip = numpy.argmax(grads_magnitude)
+        #                 if grads_magnitude[index_of_token_to_flip] == -1:
+        #                     # If we've already flipped all of the tokens, we give up.
+        #                     break
+        #                 flipped.append(index_of_token_to_flip)
 
-                # TODO(mattg): This is quite a bit of a hack for getting the vocab id...  I don't
-                # have better ideas at the moment, though.
-                indexer_name = self.namespace
-                input_tokens = text_field._indexed_tokens[indexer_name]
-                original_id_of_token_to_flip = input_tokens[index_of_token_to_flip]
+        #                 # TODO(mattg): This is quite a bit of a hack for getting the vocab id...  I don't
+        #                 # have better ideas at the moment, though.
+        #                 indexer_name = self.namespace
+        #                 input_tokens = text_field._indexed_tokens[indexer_name]
+        #                 original_id_of_token_to_flip = input_tokens[index_of_token_to_flip]
 
-                # Get new token using taylor approximation.
-                new_id = self._first_order_taylor(
-                    grad[index_of_token_to_flip], original_id_of_token_to_flip, sign
-                )
+        #                 # Get new token using taylor approximation.
+        #                 new_id = self._first_order_taylor(
+        #                     grad[index_of_token_to_flip], original_id_of_token_to_flip, sign
+        #                 )
 
-                # Flip token.  We need to tell the instance to re-index itself, so the text field
-                # will actually update.
-                new_token = Token(
-                    self.vocab._index_to_token[self.namespace][new_id]
-                )  # type: ignore
-                text_field.tokens[index_of_token_to_flip] = new_token
-                instance.indexed = False
+        #                 # Flip token.  We need to tell the instance to re-index itself, so the text field
+        #                 # will actually update.
+        #                 new_token = Token(
+        #                     self.vocab._index_to_token[self.namespace][new_id]
+        #                 )  # type: ignore
+        #                 text_field.tokens[index_of_token_to_flip] = new_token
+        #                 instance.indexed = False
 
-                # Get model predictions on instance, and then label the instances
-                grads, outputs = self.predictor.get_gradients([instance])  # predictions
-                for key, output in outputs.items():
-                    if isinstance(output, torch.Tensor):
-                        outputs[key] = output.detach().cpu().numpy().squeeze()
-                    elif isinstance(output, list):
-                        outputs[key] = output[0]
+        #                 # Get model predictions on instance, and then label the instances
+        #                 grads, outputs = self.predictor.get_gradients([instance])  # predictions
+        #                 for key, output in outputs.items():
+        #                     if isinstance(output, torch.Tensor):
+        #                         outputs[key] = output.detach().cpu().numpy().squeeze()
+        #                     elif isinstance(output, list):
+        #                         outputs[key] = output[0]
 
-                # TODO(mattg): taking the first result here seems brittle, if we're in a case where
-                # there are multiple predictions.
-                labeled_instance = self.predictor.predictions_to_labeled_instances(
-                    instance, outputs
-                )[0]
+        #                 # TODO(mattg): taking the first result here seems brittle, if we're in a case where
+        #                 # there are multiple predictions.
+        #                 labeled_instance = self.predictor.predictions_to_labeled_instances(
+        #                     instance, outputs
+        #                 )[0]
 
-                # If we've met our stopping criterion, we stop.
-                has_changed = utils.instance_has_changed(labeled_instance, fields_to_compare)
-                if target is None and has_changed:
-                    # With no target, we just want to change the prediction.
-                    break
-                if target is not None and not has_changed:
-                    # With a given target, we want to *match* the target, which we check by
-                    # `not has_changed`.
-                    break
+        #                 # If we've met our stopping criterion, we stop.
+        #                 has_changed = utils.instance_has_changed(labeled_instance, fields_to_compare)
 
-            final_tokens.append(text_field.tokens)
+        #                 if target is None and has_changed:
+        #                     # With no target, we just want to change the prediction.
+        #                     break
+
+        #                 if target is not None and not has_changed:
+        #                     # With a given target, we want to *match* the target, which we check by
+        #                     # `not has_changed`.
+        #                     break
+
+        #             final_tokens.append(text_field.tokens)
 
         return sanitize({"final": final_tokens, "original": original_tokens, "outputs": outputs})
 
