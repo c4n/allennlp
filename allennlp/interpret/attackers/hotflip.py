@@ -26,29 +26,29 @@ class Hotflip(Attacker):
     """
     Runs the HotFlip style attack at the word-level https://arxiv.org/abs/1712.06751.  We use the
     first-order taylor approximation described in https://arxiv.org/abs/1903.06620, in the function
-    ``_first_order_taylor()``.
+    `_first_order_taylor()`.
 
     We try to re-use the embedding matrix from the model when deciding what other words to flip a
     token to.  For a large class of models, this is straightforward.  When there is a
     character-level encoder, however (e.g., with ELMo, any char-CNN, etc.), or a combination of
     encoders (e.g., ELMo + glove), we need to construct a fake embedding matrix that we can use in
-    ``_first_order_taylor()``.  We do this by getting a list of words from the model's vocabulary
+    `_first_order_taylor()`.  We do this by getting a list of words from the model's vocabulary
     and embedding them using the encoder.  This can be expensive, both in terms of time and memory
-    usage, so we take a ``max_tokens`` parameter to limit the size of this fake embedding matrix.
+    usage, so we take a `max_tokens` parameter to limit the size of this fake embedding matrix.
     This also requires a model to `have` a token vocabulary in the first place, which can be
     problematic for models that only have character vocabularies.
 
     # Parameters
 
-    predictor : ``Predictor``
+    predictor : `Predictor`
         The model (inside a Predictor) that we're attacking.  We use this to get gradients and
         predictions.
-    vocab_namespace : ``str``, optional (default='tokens')
+    vocab_namespace : `str`, optional (default='tokens')
         We use this to know three things: (1) which tokens we should ignore when producing flips
         (we don't consider non-alphanumeric tokens); (2) what the string value is of the token that
         we produced, so we can show something human-readable to the user; and (3) if we need to
         construct a fake embedding matrix, we use the tokens in the vocabulary as flip candidates.
-    max_tokens : ``int``, optional (default=5000)
+    max_tokens : `int`, optional (default=5000)
         This is only used when we need to construct a fake embedding matrix.  That matrix can take
         a lot of memory when the vocab size is large.  This parameter puts a cap on the number of
         tokens to use, so the fake embedding matrix doesn't take as much memory.
@@ -74,7 +74,7 @@ class Hotflip(Attacker):
     def initialize(self):
         """
         Call this function before running attack_from_json(). We put the call to
-        ``_construct_embedding_matrix()`` in this function to prevent a large amount of compute
+        `_construct_embedding_matrix()` in this function to prevent a large amount of compute
         being done when __init__() is called.
         """
         if self.embedding_matrix is None:
@@ -121,23 +121,20 @@ class Hotflip(Attacker):
                 all_indices = [
                     self.vocab._token_to_index[self.namespace][token] for token in all_tokens
                 ]
-                inputs[indexer_name] = torch.LongTensor(all_indices).unsqueeze(0)
+                inputs[indexer_name] = {"tokens": torch.LongTensor(all_indices).unsqueeze(0)}
             elif isinstance(token_indexer, TokenCharactersIndexer):
                 tokens = [Token(x) for x in all_tokens]
                 max_token_length = max(len(x) for x in all_tokens)
                 # sometime max_token_length is too short for cnn encoder
-                max_token_length = max(max_token_length, 3)
-                indexed_tokens = token_indexer.tokens_to_indices(
-                    tokens, self.vocab, "token_characters"
-                )
-                padded_tokens = token_indexer.as_padded_tensor(
-                    indexed_tokens,
-                    {"token_characters": len(tokens)},
-                    {"num_token_characters": max_token_length},
-                )
-                inputs[indexer_name] = torch.LongTensor(
-                    padded_tokens["token_characters"]
-                ).unsqueeze(0)
+                max_token_length = max(max_token_length, token_indexer._min_padding_length)
+                indexed_tokens = token_indexer.tokens_to_indices(tokens, self.vocab)
+                padding_lengths = token_indexer.get_padding_lengths(indexed_tokens)
+                padded_tokens = token_indexer.as_padded_tensor_dict(indexed_tokens, padding_lengths)
+                inputs[indexer_name] = {
+                    "token_characters": torch.LongTensor(
+                        padded_tokens["token_characters"]
+                    ).unsqueeze(0)
+                }
             elif isinstance(token_indexer, ELMoTokenCharactersIndexer):
                 elmo_tokens = []
                 for token in all_tokens:
@@ -145,7 +142,7 @@ class Hotflip(Attacker):
                         [Token(text=token)], self.vocab, "sentence"
                     )["sentence"]
                     elmo_tokens.append(elmo_indexed_token[0])
-                inputs[indexer_name] = torch.LongTensor(elmo_tokens).unsqueeze(0)
+                inputs[indexer_name] = {"tokens": torch.LongTensor(elmo_tokens).unsqueeze(0)}
             else:
                 raise RuntimeError("Unsupported token indexer:", token_indexer)
 
@@ -161,8 +158,8 @@ class Hotflip(Attacker):
     ) -> JsonDict:
         """
         Replaces one token at a time from the input until the model's prediction changes.
-        ``input_field_to_attack`` is for example ``tokens``, it says what the input field is
-        called.  ``grad_input_field`` is for example ``grad_input_1``, which is a key into a grads
+        `input_field_to_attack` is for example `tokens`, it says what the input field is
+        called.  `grad_input_field` is for example `grad_input_1`, which is a key into a grads
         dictionary.
 
         The method computes the gradient w.r.t. the tokens, finds the token with the maximum
@@ -172,26 +169,26 @@ class Hotflip(Attacker):
 
         # Parameters
 
-        inputs : ``JsonDict``
-            The model inputs, the same as what is passed to a ``Predictor``.
-        input_field_to_attack : ``str``, optional (default='tokens')
+        inputs : `JsonDict`
+            The model inputs, the same as what is passed to a `Predictor`.
+        input_field_to_attack : `str`, optional (default='tokens')
             The field that has the tokens that we're going to be flipping.  This must be a
-            ``TextField``.
-        grad_input_field : ``str``, optional (default='grad_input_1')
+            `TextField`.
+        grad_input_field : `str`, optional (default='grad_input_1')
             If there is more than one field that gets embedded in your model (e.g., a question and
             a passage, or a premise and a hypothesis), this tells us the key to use to get the
             correct gradients.  This selects from the output of :func:`Predictor.get_gradients`.
-        ignore_tokens : ``List[str]``, optional (default=DEFAULT_IGNORE_TOKENS)
+        ignore_tokens : `List[str]`, optional (default=DEFAULT_IGNORE_TOKENS)
             These tokens will not be flipped.  The default list includes some simple punctuation,
             OOV and padding tokens, and common control tokens for BERT, etc.
-        target : ``JsonDict``, optional (default=None)
+        target : `JsonDict`, optional (default=None)
             If given, this will be a `targeted` hotflip attack, where instead of just trying to
             change a model's prediction from what it current is predicting, we try to change it to
-            a `specific` target value.  This is a ``JsonDict`` because it needs to specify the
+            a `specific` target value.  This is a `JsonDict` because it needs to specify the
             field name and target value.  For example, for a masked LM, this would be something
-            like ``{"words": ["she"]}``, because ``"words"`` is the field name, there is one mask
+            like `{"words": ["she"]}`, because `"words"` is the field name, there is one mask
             token (hence the list of length one), and we want to change the prediction from
-            whatever it was to ``"she"``.
+            whatever it was to `"she"`.
         """
         if self.embedding_matrix is None:
             self.initialize()
@@ -201,6 +198,7 @@ class Hotflip(Attacker):
         # _towards_ the target.
         sign = -1 if target is None else 1
         instance = self.predictor._json_to_instance(inputs)
+<<<<<<< HEAD
         #         if target is None:
         #             output_dict = self.predictor._model.forward_on_instance(instance)
         #         else:
@@ -317,6 +315,120 @@ class Hotflip(Attacker):
         #                     break
 
         #             final_tokens.append(text_field.tokens)
+=======
+        if target is None:
+            output_dict = self.predictor._model.forward_on_instance(instance)
+        else:
+            output_dict = target
+
+        # This now holds the predictions that we want to change (either away from or towards,
+        # depending on whether `target` was passed).  We'll use this in the loop below to check for
+        # when we've met our stopping criterion.
+        original_instances = self.predictor.predictions_to_labeled_instances(instance, output_dict)
+
+        # This is just for ease of access in the UI, so we know the original tokens.  It's not used
+        # in the logic below.
+        original_text_field: TextField = original_instances[0][  # type: ignore
+            input_field_to_attack
+        ]
+        original_tokens = deepcopy(original_text_field.tokens)
+
+        final_tokens = []
+        # `original_instances` is a list because there might be several different predictions that
+        # we're trying to attack (e.g., all of the NER tags for an input sentence).  We attack them
+        # one at a time.
+        for instance in original_instances:
+            # Gets a list of the fields that we want to check to see if they change.
+            fields_to_compare = utils.get_fields_to_compare(inputs, instance, input_field_to_attack)
+
+            # We'll be modifying the tokens in this text field below, and grabbing the modified
+            # list after the `while` loop.
+            text_field: TextField = instance[input_field_to_attack]  # type: ignore
+
+            # Because we can save computation by getting grads and outputs at the same time, we do
+            # them together at the end of the loop, even though we use grads at the beginning and
+            # outputs at the end.  This is our initial gradient for the beginning of the loop.  The
+            # output can be ignored here.
+            grads, outputs = self.predictor.get_gradients([instance])
+
+            # Ignore any token that is in the ignore_tokens list by setting the token to already
+            # flipped.
+            flipped: List[int] = []
+            for index, token in enumerate(text_field.tokens):
+                if token.text in ignore_tokens:
+                    flipped.append(index)
+            if "clusters" in outputs:
+                # Coref unfortunately needs a special case here.  We don't want to flip words in
+                # the same predicted coref cluster, but we can't really specify a list of tokens,
+                # because, e.g., "he" could show up in several different clusters.
+                # TODO(mattg): perhaps there's a way to get `predictions_to_labeled_instances` to
+                # return the set of tokens that shouldn't be changed for each instance?  E.g., you
+                # could imagine setting a field on the `Token` object, that we could then read
+                # here...
+                for cluster in outputs["clusters"]:
+                    for mention in cluster:
+                        for index in range(mention[0], mention[1] + 1):
+                            flipped.append(index)
+
+            while True:
+                # Compute L2 norm of all grads.
+                grad = grads[grad_input_field][0]
+                grads_magnitude = [g.dot(g) for g in grad]
+
+                # only flip a token once
+                for index in flipped:
+                    grads_magnitude[index] = -1
+
+                # We flip the token with highest gradient norm.
+                index_of_token_to_flip = numpy.argmax(grads_magnitude)
+                if grads_magnitude[index_of_token_to_flip] == -1:
+                    # If we've already flipped all of the tokens, we give up.
+                    break
+                flipped.append(index_of_token_to_flip)
+
+                text_field_tensors = text_field.as_tensor(text_field.get_padding_lengths())
+                input_tokens = util.get_token_ids_from_text_field_tensors(text_field_tensors)
+                original_id_of_token_to_flip = input_tokens[index_of_token_to_flip]
+
+                # Get new token using taylor approximation.
+                new_id = self._first_order_taylor(
+                    grad[index_of_token_to_flip], original_id_of_token_to_flip, sign
+                )
+
+                # Flip token.  We need to tell the instance to re-index itself, so the text field
+                # will actually update.
+                new_token = Token(
+                    self.vocab._index_to_token[self.namespace][new_id]
+                )  # type: ignore
+                text_field.tokens[index_of_token_to_flip] = new_token
+                instance.indexed = False
+
+                # Get model predictions on instance, and then label the instances
+                grads, outputs = self.predictor.get_gradients([instance])  # predictions
+                for key, output in outputs.items():
+                    if isinstance(output, torch.Tensor):
+                        outputs[key] = output.detach().cpu().numpy().squeeze()
+                    elif isinstance(output, list):
+                        outputs[key] = output[0]
+
+                # TODO(mattg): taking the first result here seems brittle, if we're in a case where
+                # there are multiple predictions.
+                labeled_instance = self.predictor.predictions_to_labeled_instances(
+                    instance, outputs
+                )[0]
+
+                # If we've met our stopping criterion, we stop.
+                has_changed = utils.instance_has_changed(labeled_instance, fields_to_compare)
+                if target is None and has_changed:
+                    # With no target, we just want to change the prediction.
+                    break
+                if target is not None and not has_changed:
+                    # With a given target, we want to *match* the target, which we check by
+                    # `not has_changed`.
+                    break
+
+            final_tokens.append(text_field.tokens)
+>>>>>>> upstream/master
 
         return sanitize({"final": final_tokens, "original": original_tokens, "outputs": outputs})
 

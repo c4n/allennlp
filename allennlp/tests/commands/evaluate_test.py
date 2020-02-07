@@ -8,7 +8,7 @@ from flaky import flaky
 from allennlp.commands.evaluate import evaluate_from_args, Evaluate, evaluate
 from allennlp.common.testing import AllenNlpTestCase
 from allennlp.data import DataIterator, Instance
-from allennlp.data.dataset import Batch
+from allennlp.data.batch import Batch
 from allennlp.data.iterators.data_iterator import TensorDict
 from allennlp.models import Model
 
@@ -41,7 +41,7 @@ class TestEvaluate(AllenNlpTestCase):
 
         self.parser = argparse.ArgumentParser(description="Testing")
         subparsers = self.parser.add_subparsers(title="Commands", metavar="")
-        Evaluate().add_subparser("evaluate", subparsers)
+        Evaluate().add_subparser(subparsers)
 
     def test_evaluate_calculates_average_loss(self):
         losses = [7.0, 9.0, 8.0]

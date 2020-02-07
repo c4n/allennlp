@@ -18,7 +18,7 @@ class UpdateMomentum(Callback):
 
     # Parameters
 
-    momentum_scheduler : ``MomentumScheduler``
+    momentum_scheduler : `MomentumScheduler`
         The momentum scheduler to run.
     """
 
@@ -44,7 +44,7 @@ class UpdateMomentum(Callback):
 
     @classmethod
     def from_params(  # type: ignore
-        cls, params: Params, optimizer: torch.optim.Optimizer
+        cls, params: Params, optimizer: torch.optim.Optimizer, **extras
     ) -> "UpdateMomentum":
 
         return cls(

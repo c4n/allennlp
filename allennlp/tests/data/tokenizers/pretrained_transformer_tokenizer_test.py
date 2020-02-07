@@ -2,8 +2,10 @@ import gc
 
 import time
 
+from allennlp.common import Params
 from allennlp.common.testing import AllenNlpTestCase
 from allennlp.data.tokenizers import PretrainedTransformerTokenizer
+from flaky import flaky
 
 
 class TestPretrainedTransformerTokenizer(AllenNlpTestCase):
@@ -196,6 +198,7 @@ class TestPretrainedTransformerTokenizer(AllenNlpTestCase):
             assert tokenized[-2].text == "."
             assert tokenized[-2].idx == len(sentence) - 1
 
+    @flaky(max_runs=3)  # This test relies on elapsed wall time, so it's inherently flaky.
     def test_token_idx_performance(self):
         text = """
             Tokyo (東京 Tōkyō, English: /ˈtoʊkioʊ/,[7] Japanese: [toːkʲoː]), officially Tokyo Metropolis (東京都
@@ -302,4 +305,53 @@ class TestPretrainedTransformerTokenizer(AllenNlpTestCase):
         assert (
             idxs[first_sentence_end_index] + len(tokens[first_sentence_end_index])
             == idxs[second_sentence_start_index]
+        )
+
+    def test_determine_num_special_tokens_added(self):
+        tokenizer = PretrainedTransformerTokenizer("bert-base-cased")
+        assert tokenizer._determine_num_special_tokens_added() == (1, 1)
+
+    def test_tokenizer_kwargs_forced_lowercase(self):
+        text = "Hello there! General Kenobi."
+        forced_lowercase_tokenizer = PretrainedTransformerTokenizer(
+            "bert-base-cased", tokenizer_kwargs={"do_lower_case": True}
+        )
+        assert forced_lowercase_tokenizer._tokenizer_lowercases
+        tokenized = [token.text for token in forced_lowercase_tokenizer.tokenize(text)]
+        lowercase_tokens = [
+            "[CLS]",
+            "hello",
+            "there",
+            "!",
+            "general",
+            "k",
+            "##eno",
+            "##bi",
+            ".",
+            "[SEP]",
+        ]
+        assert tokenized == lowercase_tokens
+
+    def test_tokenizer_kwargs_default(self):
+        text = "Hello there! General Kenobi."
+        tokenizer = PretrainedTransformerTokenizer("bert-base-cased")
+        original_tokens = [
+            "[CLS]",
+            "Hello",
+            "there",
+            "!",
+            "General",
+            "Ken",
+            "##ob",
+            "##i",
+            ".",
+            "[SEP]",
+        ]
+        assert not tokenizer._tokenizer_lowercases
+        tokenized = [token.text for token in tokenizer.tokenize(text)]
+        assert tokenized == original_tokens
+
+    def test_from_params_kwargs(self):
+        PretrainedTransformerTokenizer.from_params(
+            Params({"model_name": "bert-base-uncased", "tokenizer_kwargs": {"do_lower_case": True}})
         )

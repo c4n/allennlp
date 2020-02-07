@@ -2,19 +2,19 @@ import datetime
 import logging
 import math
 import os
+import re
 import time
 import traceback
-from typing import Dict, Optional, Tuple, Union, Iterable, Any
+from typing import Dict, List, Optional, Tuple, Union, Iterable, Any
 
 import torch
 import torch.distributed as dist
 import torch.optim.lr_scheduler
 from torch.nn.parallel import DistributedDataParallel
 
-from allennlp.common import Params
-from allennlp.common.checks import ConfigurationError, parse_cuda_device, check_for_gpu
-from allennlp.common.tqdm import Tqdm
-from allennlp.common.util import dump_metrics, gpu_memory_mb, peak_memory_mb, lazy_groups_of
+from allennlp.common import Lazy, Tqdm
+from allennlp.common.checks import ConfigurationError, check_for_gpu
+from allennlp.common import util as common_util
 from allennlp.data.instance import Instance
 from allennlp.data.iterators.data_iterator import DataIterator, TensorDict
 from allennlp.models.model import Model
@@ -32,7 +32,7 @@ from allennlp.training.trainer_base import TrainerBase
 logger = logging.getLogger(__name__)
 
 
-@TrainerBase.register("default")
+@TrainerBase.register("default", constructor="from_partial_objects")
 class Trainer(TrainerBase):
     def __init__(
         self,
@@ -63,136 +63,136 @@ class Trainer(TrainerBase):
         log_batch_size_period: Optional[int] = None,
         moving_average: Optional[MovingAverage] = None,
         distributed: bool = False,
-        rank: int = 0,
+        local_rank: int = 0,
         world_size: int = 1,
         num_gradient_accumulation_steps: int = 1,
     ) -> None:
         """
         A trainer for doing supervised learning. It just takes a labeled dataset
-        and a ``DataIterator``, and uses the supplied ``Optimizer`` to learn the weights
+        and a `DataIterator`, and uses the supplied `Optimizer` to learn the weights
         for your model over some fixed number of epochs. You can also pass in a validation
         dataset and enable early stopping. There are many other bells and whistles as well.
 
         # Parameters
 
-        model : ``Model``, required.
+        model : `Model`, required.
             An AllenNLP model to be optimized. Pytorch Modules can also be optimized if
-            their ``forward`` method returns a dictionary with a "loss" key, containing a
+            their `forward` method returns a dictionary with a "loss" key, containing a
             scalar tensor representing the loss function to be optimized.
 
             If you are training your model using GPUs, your model should already be
             on the correct device. (If you use `Trainer.from_params` this will be
             handled for you.)
-        optimizer : ``torch.nn.Optimizer``, required.
+        optimizer : `torch.nn.Optimizer`, required.
             An instance of a Pytorch Optimizer, instantiated with the parameters of the
             model to be optimized.
-        iterator : ``DataIterator``, required.
-            A method for iterating over a ``Dataset``, yielding padded indexed batches.
-        train_dataset : ``Dataset``, required.
-            A ``Dataset`` to train on. The dataset should have already been indexed.
-        validation_dataset : ``Dataset``, optional, (default = None).
-            A ``Dataset`` to evaluate on. The dataset should have already been indexed.
+        iterator : `DataIterator`, required.
+            A method for iterating over a `Dataset`, yielding padded indexed batches.
+        train_dataset : `Dataset`, required.
+            A `Dataset` to train on. The dataset should have already been indexed.
+        validation_dataset : `Dataset`, optional, (default = None).
+            A `Dataset` to evaluate on. The dataset should have already been indexed.
         patience : Optional[int] > 0, optional (default=None)
             Number of epochs to be patient before early stopping: the training is stopped
-            after ``patience`` epochs with no improvement. If given, it must be ``> 0``.
+            after `patience` epochs with no improvement. If given, it must be `> 0`.
             If None, early stopping is disabled.
         validation_metric : str, optional (default="loss")
             Validation metric to measure for whether to stop training using patience
-            and whether to serialize an ``is_best`` model each epoch. The metric name
+            and whether to serialize an `is_best` model each epoch. The metric name
             must be prepended with either "+" or "-", which specifies whether the metric
             is an increasing or decreasing function.
-        validation_iterator : ``DataIterator``, optional (default=None)
-            An iterator to use for the validation set.  If ``None``, then
+        validation_iterator : `DataIterator`, optional (default=None)
+            An iterator to use for the validation set.  If `None`, then
             use the training `iterator`.
-        shuffle : ``bool``, optional (default=True)
+        shuffle : `bool`, optional (default=True)
             Whether to shuffle the instances in the iterator or not.
         num_epochs : int, optional (default = 20)
             Number of training epochs.
         serialization_dir : str, optional (default=None)
             Path to directory for saving and loading model files. Models will not be saved if
             this parameter is not passed.
-        num_serialized_models_to_keep : ``int``, optional (default=20)
+        num_serialized_models_to_keep : `int`, optional (default=20)
             Number of previous model checkpoints to retain.  Default is to keep 20 checkpoints.
             A value of None or -1 means all checkpoints will be kept.
-        keep_serialized_model_every_num_seconds : ``int``, optional (default=None)
+        keep_serialized_model_every_num_seconds : `int`, optional (default=None)
             If num_serialized_models_to_keep is not None, then occasionally it's useful to
             save models at a given interval in addition to the last num_serialized_models_to_keep.
             To do so, specify keep_serialized_model_every_num_seconds as the number of seconds
             between permanently saved checkpoints.  Note that this option is only used if
             num_serialized_models_to_keep is not None, otherwise all checkpoints are kept.
-        checkpointer : ``Checkpointer``, optional (default=None)
+        checkpointer : `Checkpointer`, optional (default=None)
             An instance of class Checkpointer to use instead of the default. If a checkpointer is specified,
             the arguments num_serialized_models_to_keep and keep_serialized_model_every_num_seconds should
             not be specified. The caller is responsible for initializing the checkpointer so that it is
             consistent with serialization_dir.
-        model_save_interval : ``float``, optional (default=None)
-            If provided, then serialize models every ``model_save_interval``
+        model_save_interval : `float`, optional (default=None)
+            If provided, then serialize models every `model_save_interval`
             seconds within single epochs.  In all cases, models are also saved
-            at the end of every epoch if ``serialization_dir`` is provided.
-        cuda_device : ``int``, optional (default = -1)
+            at the end of every epoch if `serialization_dir` is provided.
+        cuda_device : `int`, optional (default = -1)
             An integer specifying the CUDA device(s) to use for this process. If -1, the CPU is used.
             Data parallelism is controlled at the allennlp train level, so each trainer will have a single
             GPU.
-        grad_norm : ``float``, optional, (default = None).
+        grad_norm : `float`, optional, (default = None).
             If provided, gradient norms will be rescaled to have a maximum of this value.
-        grad_clipping : ``float``, optional (default = ``None``).
+        grad_clipping : `float`, optional (default = `None`).
             If provided, gradients will be clipped `during the backward pass` to have an (absolute)
-            maximum of this value.  If you are getting ``NaNs`` in your gradients during training
-            that are not solved by using ``grad_norm``, you may need this.
-        learning_rate_scheduler : ``LearningRateScheduler``, optional (default = None)
+            maximum of this value.  If you are getting `NaNs` in your gradients during training
+            that are not solved by using `grad_norm`, you may need this.
+        learning_rate_scheduler : `LearningRateScheduler`, optional (default = None)
             If specified, the learning rate will be decayed with respect to
             this schedule at the end of each epoch (or batch, if the scheduler implements
-            the ``step_batch`` method). If you use :class:`torch.optim.lr_scheduler.ReduceLROnPlateau`,
-            this will use the ``validation_metric`` provided to determine if learning has plateaued.
+            the `step_batch` method). If you use `torch.optim.lr_scheduler.ReduceLROnPlateau`,
+            this will use the `validation_metric` provided to determine if learning has plateaued.
             To support updating the learning rate on every batch, this can optionally implement
-            ``step_batch(batch_num_total)`` which updates the learning rate given the batch number.
-        momentum_scheduler : ``MomentumScheduler``, optional (default = None)
+            `step_batch(batch_num_total)` which updates the learning rate given the batch number.
+        momentum_scheduler : `MomentumScheduler`, optional (default = None)
             If specified, the momentum will be updated at the end of each batch or epoch
             according to the schedule.
-        summary_interval : ``int``, optional, (default = 100)
+        summary_interval : `int`, optional, (default = 100)
             Number of batches between logging scalars to tensorboard
-        histogram_interval : ``int``, optional, (default = ``None``)
-            If not None, then log histograms to tensorboard every ``histogram_interval`` batches.
+        histogram_interval : `int`, optional, (default = `None`)
+            If not None, then log histograms to tensorboard every `histogram_interval` batches.
             When this parameter is specified, the following additional logging is enabled:
                 * Histograms of model parameters
                 * The ratio of parameter update norm to parameter norm
                 * Histogram of layer activations
             We log histograms of the parameters returned by
-            ``model.get_parameters_for_histogram_tensorboard_logging``.
-            The layer activations are logged for any modules in the ``Model`` that have
-            the attribute ``should_log_activations`` set to ``True``.  Logging
+            `model.get_parameters_for_histogram_tensorboard_logging`.
+            The layer activations are logged for any modules in the `Model` that have
+            the attribute `should_log_activations` set to `True`.  Logging
             histograms requires a number of GPU-CPU copies during training and is typically
             slow, so we recommend logging histograms relatively infrequently.
             Note: only Modules that return tensors, tuples of tensors or dicts
             with tensors as values currently support activation logging.
-        should_log_parameter_statistics : ``bool``, optional, (default = True)
+        should_log_parameter_statistics : `bool`, optional, (default = True)
             Whether to send parameter statistics (mean and standard deviation
             of parameters and gradients) to tensorboard.
-        should_log_learning_rate : ``bool``, optional, (default = False)
+        should_log_learning_rate : `bool`, optional, (default = False)
             Whether to send parameter specific learning rate to tensorboard.
-        log_batch_size_period : ``int``, optional, (default = ``None``)
+        log_batch_size_period : `int`, optional, (default = `None`)
             If defined, how often to log the average batch size.
-        moving_average : ``MovingAverage``, optional, (default = None)
+        moving_average : `MovingAverage`, optional, (default = None)
             If provided, we will maintain moving averages for all parameters. During training, we
             employ a shadow variable for each parameter, which maintains the moving average. During
             evaluation, we backup the original parameters and assign the moving averages to corresponding
             parameters. Be careful that when saving the checkpoint, we will save the moving averages of
             parameters. This is necessary because we want the saved model to perform as well as the validated
             model if we load it later. But this may cause problems if you restart the training from checkpoint.
-        distributed : ``bool``, optional, (default = False)
+        distributed : `bool`, optional, (default = False)
             If set, PyTorch's `DistributedDataParallel` is used to train the model in multiple GPUs. This also
             requires `world_size` to be greater than 1.
-        rank : ``int``, optional, (default = 0)
+        local_rank : `int`, optional, (default = 0)
             This is the unique identifier of the `Trainer` in a distributed process group. The GPU device id is
             used as the rank.
-        world_size : ``int``, (default = 1)
+        world_size : `int`, (default = 1)
             The number of `Trainer` workers participating in the distributed training.
-        num_gradient_accumulation_steps : ``int``, optional, (default = 1)
+        num_gradient_accumulation_steps : `int`, optional, (default = 1)
             Gradients are accumulated for the given number of steps before doing an optimizer step. This can
             be useful to accommodate batches that are larger than the RAM size. Refer Thomas Wolf's
             [post](https://tinyurl.com/y5mv44fw) for details on Gradient Accumulation.
         """
-        super().__init__(serialization_dir, cuda_device, distributed, rank, world_size)
+        super().__init__(serialization_dir, cuda_device, distributed, local_rank, world_size)
 
         # I am not calling move_to_gpu here, because if the model is
         # not already on the GPU then the optimizer is going to be wrong.
@@ -254,7 +254,7 @@ class Trainer(TrainerBase):
 
         # We keep the total batch number as an instance variable because it
         # is used inside a closure for the hook which logs activations in
-        # ``_enable_activation_logging``.
+        # `_enable_activation_logging`.
         self._batch_num_total = 0
 
         self._tensorboard = TensorboardWriter(
@@ -295,8 +295,8 @@ class Trainer(TrainerBase):
 
     def batch_loss(self, batch: TensorDict, for_training: bool) -> torch.Tensor:
         """
-        Does a forward pass on the given batches and returns the ``loss`` value in the result.
-        If ``for_training`` is `True` also applies regularization penalty.
+        Does a forward pass on the given batches and returns the `loss` value in the result.
+        If `for_training` is `True` also applies regularization penalty.
         """
         batch = nn_util.move_to_device(batch, self.cuda_device)
         output_dict = self._pytorch_model(**batch)
@@ -320,10 +320,10 @@ class Trainer(TrainerBase):
         Trains one epoch and returns metrics.
         """
         logger.info("Epoch %d/%d", epoch, self._num_epochs - 1)
-        peak_cpu_usage = peak_memory_mb()
+        peak_cpu_usage = common_util.peak_memory_mb()
         logger.info(f"Peak CPU memory usage MB: {peak_cpu_usage}")
         gpu_usage = []
-        for gpu, memory in gpu_memory_mb().items():
+        for gpu, memory in common_util.gpu_memory_mb().items():
             gpu_usage.append((gpu, memory))
             logger.info(f"GPU {gpu} memory usage MB: {memory}")
 
@@ -333,7 +333,7 @@ class Trainer(TrainerBase):
 
         # Get tqdm for the training batches
         batch_generator = self.iterator(self.train_data, num_epochs=1, shuffle=self.shuffle)
-        batch_group_generator = lazy_groups_of(
+        batch_group_generator = common_util.lazy_groups_of(
             batch_generator, self._num_gradient_accumulation_steps
         )
         num_training_batches = math.ceil(
@@ -453,6 +453,12 @@ class Trainer(TrainerBase):
                 self._save_checkpoint(
                     "{0}.{1}".format(epoch, training_util.time_to_str(int(last_save_time)))
                 )
+
+        # Let all workers finish their epoch before computing
+        # the final statistics for the epoch.
+        if self._distributed:
+            dist.barrier()
+
         metrics = training_util.get_metrics(
             self.model,
             train_loss,
@@ -559,10 +565,6 @@ class Trainer(TrainerBase):
                 if key.startswith("gpu_"):
                     metrics["peak_" + key] = max(metrics.get("peak_" + key, 0), value)
 
-            # Let all workers finish training before going into the validation mode
-            if self._distributed:
-                dist.barrier()
-
             if self._validation_data is not None:
                 with torch.no_grad():
                     # We have a validation set, so compute all the metrics on it.
@@ -617,7 +619,7 @@ class Trainer(TrainerBase):
                 self._metric_tracker.best_epoch_metrics = val_metrics
 
             if self._serialization_dir and self._master:
-                dump_metrics(
+                common_util.dump_metrics(
                     os.path.join(self._serialization_dir, f"metrics_epoch_{epoch}.json"), metrics
                 )
 
@@ -705,9 +707,9 @@ class Trainer(TrainerBase):
         from model parameters. This function should only be used to continue training -
         if you wish to load a model for inference/load parts of a model into a new
         computation graph, you should use the native Pytorch functions:
-        `` model.load_state_dict(torch.load("/path/to/model/weights.th"))``
+        ` model.load_state_dict(torch.load("/path/to/model/weights.th"))`
 
-        If ``self._serialization_dir`` does not exist or does not contain any checkpointed weights,
+        If `self._serialization_dir` does not exist or does not contain any checkpointed weights,
         this function will do nothing and return 0.
 
         # Returns
@@ -733,10 +735,10 @@ class Trainer(TrainerBase):
             self._momentum_scheduler.load_state_dict(training_state["momentum_scheduler"])
         training_util.move_optimizer_to_cuda(self.optimizer)
 
-        # Currently the ``training_state`` contains a serialized ``MetricTracker``.
+        # Currently the `training_state` contains a serialized `MetricTracker`.
         if "metric_tracker" in training_state:
             self._metric_tracker.load_state_dict(training_state["metric_tracker"])
-        # It used to be the case that we tracked ``val_metric_per_epoch``.
+        # It used to be the case that we tracked `val_metric_per_epoch`.
         elif "val_metric_per_epoch" in training_state:
             self._metric_tracker.clear()
             self._metric_tracker.add_metrics(training_state["val_metric_per_epoch"])
@@ -757,29 +759,54 @@ class Trainer(TrainerBase):
 
         return epoch_to_return
 
-    # Requires custom from_params.
     @classmethod
-    def from_params(  # type: ignore
+    def from_partial_objects(
         cls,
         model: Model,
         serialization_dir: str,
         iterator: DataIterator,
         train_data: Iterable[Instance],
-        validation_data: Optional[Iterable[Instance]],
-        params: Params,
         validation_iterator: DataIterator = None,
+        validation_data: Iterable[Instance] = None,
         local_rank: int = 0,
+        patience: int = None,
+        validation_metric: str = "-loss",
+        shuffle: bool = True,
+        num_epochs: int = 20,
+        cuda_device: int = -1,
+        grad_norm: float = None,
+        grad_clipping: float = None,
+        model_save_interval: float = None,
+        summary_interval: int = 100,
+        histogram_interval: int = None,
+        should_log_parameter_statistics: bool = True,
+        should_log_learning_rate: bool = False,
+        log_batch_size_period: int = None,
+        distributed: bool = None,
+        world_size: int = 1,
+        num_gradient_accumulation_steps: int = 1,
+        no_grad: List[str] = None,
+        optimizer: Lazy[Optimizer] = None,
+        learning_rate_scheduler: Lazy[LearningRateScheduler] = None,
+        momentum_scheduler: Lazy[MomentumScheduler] = None,
+        moving_average: Lazy[MovingAverage] = None,
+        checkpointer: Lazy[Checkpointer] = None,
     ) -> "Trainer":
+        """
+        This method exists so that we can have a documented method to construct this class using
+        `FromParams`. If you are not using `FromParams` or config files, you can safely ignore this
+        method.
 
-        patience = params.pop_int("patience", None)
-        validation_metric = params.pop("validation_metric", "-loss")
-        shuffle = params.pop_bool("shuffle", True)
-        num_epochs = params.pop_int("num_epochs", 20)
-        cuda_device = parse_cuda_device(params.pop("cuda_device", -1))
-        grad_norm = params.pop_float("grad_norm", None)
-        grad_clipping = params.pop_float("grad_clipping", None)
-        lr_scheduler_params = params.pop("learning_rate_scheduler", None)
-        momentum_scheduler_params = params.pop("momentum_scheduler", None)
+        The reason we can't just use `__init__` with `FromParams` here is because there are
+        sequential dependencies to this class's arguments.  Anything that has a `Lazy[]` type
+        annotation needs something from one of the non-`Lazy` arguments.  The `Optimizer` needs to
+        have the parameters from the `Model` before it's constructed, and the `Schedulers` need to
+        have the `Optimizer`. Because of this, the typical way we construct things `FromParams`
+        doesn't work, so we use `Lazy` to allow for constructing the objects sequentially.
+
+        If you're not using `FromParams`, you can just construct these arguments in the right order
+        yourself in your code and call the constructor directly.
+        """
 
         check_for_gpu(cuda_device)
         if cuda_device >= 0:
@@ -787,61 +814,33 @@ class Trainer(TrainerBase):
             # the right device.
             model = model.cuda(cuda_device)
 
+        if no_grad:
+            for name, parameter in model.named_parameters():
+                if any(re.search(regex, name) for regex in no_grad):
+                    parameter.requires_grad_(False)
+
+        common_util.log_frozen_and_tunable_parameter_names(model)
+
         parameters = [[n, p] for n, p in model.named_parameters() if p.requires_grad]
-        optimizer = Optimizer.from_params(parameters, params.pop("optimizer"))
-        if "moving_average" in params:
-            moving_average = MovingAverage.from_params(
-                params.pop("moving_average"), parameters=parameters
-            )
-        else:
-            moving_average = None
+        optimizer_ = optimizer.construct(model_parameters=parameters)
+        if not optimizer_:
+            optimizer_ = Optimizer.default(parameters)
 
-        if lr_scheduler_params:
-            lr_scheduler = LearningRateScheduler.from_params(optimizer, lr_scheduler_params)
-        else:
-            lr_scheduler = None
-        if momentum_scheduler_params:
-            momentum_scheduler = MomentumScheduler.from_params(optimizer, momentum_scheduler_params)
-        else:
-            momentum_scheduler = None
+        batches_per_epoch = iterator.get_num_batches(train_data)
+        if batches_per_epoch == 1:  # get_num_batches returns 1 when it can't determine the answer
+            batches_per_epoch = None
+        moving_average_ = moving_average.construct(parameters=parameters)
+        learning_rate_scheduler_ = learning_rate_scheduler.construct(
+            optimizer=optimizer_, num_epochs=num_epochs, num_steps_per_epoch=batches_per_epoch
+        )
+        momentum_scheduler_ = momentum_scheduler.construct(optimizer=optimizer_)
 
-        if "checkpointer" in params:
-            if (
-                "keep_serialized_model_every_num_seconds" in params
-                or "num_serialized_models_to_keep" in params
-            ):
-                raise ConfigurationError(
-                    "Checkpointer may be initialized either from the 'checkpointer' key or from the "
-                    "keys 'num_serialized_models_to_keep' and 'keep_serialized_model_every_num_seconds'"
-                    " but the passed config uses both methods."
-                )
-            checkpointer = Checkpointer.from_params(params.pop("checkpointer"))
-        else:
-            num_serialized_models_to_keep = params.pop_int("num_serialized_models_to_keep", 20)
-            keep_serialized_model_every_num_seconds = params.pop_int(
-                "keep_serialized_model_every_num_seconds", None
-            )
-            checkpointer = Checkpointer(
-                serialization_dir=serialization_dir,
-                num_serialized_models_to_keep=num_serialized_models_to_keep,
-                keep_serialized_model_every_num_seconds=keep_serialized_model_every_num_seconds,
-            )
-        model_save_interval = params.pop_float("model_save_interval", None)
-        summary_interval = params.pop_int("summary_interval", 100)
-        histogram_interval = params.pop_int("histogram_interval", None)
-        should_log_parameter_statistics = params.pop_bool("should_log_parameter_statistics", True)
-        should_log_learning_rate = params.pop_bool("should_log_learning_rate", False)
-        log_batch_size_period = params.pop_int("log_batch_size_period", None)
-
-        distributed = params.pop_bool("distributed", False)
-        world_size = params.pop_int("world_size", 1)
-
-        num_gradient_accumulation_steps = params.pop("num_gradient_accumulation_steps", 1)
-
-        params.assert_empty(cls.__name__)
+        checkpointer_ = checkpointer.construct()
+        if not checkpointer_:
+            checkpointer_ = Checkpointer(serialization_dir)
         return cls(
             model,
-            optimizer,
+            optimizer_,
             iterator,
             train_data,
             validation_data,
@@ -854,18 +853,18 @@ class Trainer(TrainerBase):
             cuda_device=cuda_device,
             grad_norm=grad_norm,
             grad_clipping=grad_clipping,
-            learning_rate_scheduler=lr_scheduler,
-            momentum_scheduler=momentum_scheduler,
-            checkpointer=checkpointer,
+            learning_rate_scheduler=learning_rate_scheduler_,
+            momentum_scheduler=momentum_scheduler_,
+            checkpointer=checkpointer_,
             model_save_interval=model_save_interval,
             summary_interval=summary_interval,
             histogram_interval=histogram_interval,
             should_log_parameter_statistics=should_log_parameter_statistics,
             should_log_learning_rate=should_log_learning_rate,
             log_batch_size_period=log_batch_size_period,
-            moving_average=moving_average,
+            moving_average=moving_average_,
             distributed=distributed,
-            rank=local_rank,
+            local_rank=local_rank,
             world_size=world_size,
             num_gradient_accumulation_steps=num_gradient_accumulation_steps,
         )

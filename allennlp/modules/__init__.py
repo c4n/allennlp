@@ -1,12 +1,10 @@
 """
 Custom PyTorch
 `Module <https://pytorch.org/docs/master/nn.html#torch.nn.Module>`_ s
-that are used as components in AllenNLP
-:class:`~allennlp.models.model.Model` s.
+that are used as components in AllenNLP `Model` s.
 """
 
 from allennlp.modules.conditional_random_field import ConditionalRandomField
-from allennlp.modules.drop_connect import DropConnect
 from allennlp.modules.elmo import Elmo
 from allennlp.modules.feedforward import FeedForward
 from allennlp.modules.highway import Highway

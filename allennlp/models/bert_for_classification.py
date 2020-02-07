@@ -1,14 +1,13 @@
-from typing import Dict, Union, Optional
+from typing import Dict, Union
 
 from overrides import overrides
 import torch
-from pytorch_pretrained_bert.modeling import BertModel
+from transformers.modeling_bert import BertModel
 
-from allennlp.data.vocabulary import Vocabulary
+from allennlp.data import TextFieldTensors, Vocabulary
 from allennlp.models.model import Model
 from allennlp.modules.token_embedders.bert_token_embedder import PretrainedBertModel
 from allennlp.nn.initializers import InitializerApplicator
-from allennlp.nn import RegularizerApplicator
 from allennlp.training.metrics import CategoricalAccuracy
 
 
@@ -27,24 +26,22 @@ class BertForClassification(Model):
 
     # Parameters
 
-    vocab : ``Vocabulary``
-    bert_model : ``Union[str, BertModel]``
+    vocab : `Vocabulary`
+    bert_model : `Union[str, BertModel]`
         The BERT model to be wrapped. If a string is provided, we will call
-        ``BertModel.from_pretrained(bert_model)`` and use the result.
-    num_labels : ``int``, optional (default: None)
+        `BertModel.from_pretrained(bert_model)` and use the result.
+    num_labels : `int`, optional (default: None)
         How many output classes to predict. If not provided, we'll use the
-        vocab_size for the ``label_namespace``.
-    index : ``str``, optional (default: "bert")
+        vocab_size for the `label_namespace`.
+    index : `str`, optional (default: "bert")
         The index of the token indexer that generates the BERT indices.
-    label_namespace : ``str``, optional (default : "labels")
-        Used to determine the number of classes if ``num_labels`` is not supplied.
-    trainable : ``bool``, optional (default : True)
+    label_namespace : `str`, optional (default : "labels")
+        Used to determine the number of classes if `num_labels` is not supplied.
+    trainable : `bool`, optional (default : True)
         If True, the weights of the pretrained BERT model will be updated during training.
         Otherwise, they will be frozen and only the final linear layer will be trained.
-    initializer : ``InitializerApplicator``, optional
+    initializer : `InitializerApplicator`, optional
         If provided, will be used to initialize the final linear layer *only*.
-    regularizer : ``RegularizerApplicator``, optional (default=``None``)
-        If provided, will be used to calculate the regularization penalty during training.
     """
 
     def __init__(
@@ -57,9 +54,9 @@ class BertForClassification(Model):
         label_namespace: str = "labels",
         trainable: bool = True,
         initializer: InitializerApplicator = InitializerApplicator(),
-        regularizer: Optional[RegularizerApplicator] = None,
+        **kwargs,
     ) -> None:
-        super().__init__(vocab, regularizer)
+        super().__init__(vocab, **kwargs)
 
         if isinstance(bert_model, str):
             self.bert_model = PretrainedBertModel.load(bert_model)
@@ -87,35 +84,36 @@ class BertForClassification(Model):
         initializer(self._classification_layer)
 
     def forward(  # type: ignore
-        self, tokens: Dict[str, torch.LongTensor], label: torch.IntTensor = None
+        self, tokens: TextFieldTensors, label: torch.IntTensor = None
     ) -> Dict[str, torch.Tensor]:
 
         """
         # Parameters
 
-        tokens : Dict[str, torch.LongTensor]
-            From a ``TextField`` (that has a bert-pretrained token indexer)
+        tokens : TextFieldTensors
+            From a `TextField` (that has a bert-pretrained token indexer)
         label : torch.IntTensor, optional (default = None)
-            From a ``LabelField``
+            From a `LabelField`
 
         # Returns
 
         An output dictionary consisting of:
 
         logits : torch.FloatTensor
-            A tensor of shape ``(batch_size, num_labels)`` representing
+            A tensor of shape `(batch_size, num_labels)` representing
             unnormalized log probabilities of the label.
         probs : torch.FloatTensor
-            A tensor of shape ``(batch_size, num_labels)`` representing
+            A tensor of shape `(batch_size, num_labels)` representing
             probabilities of the label.
         loss : torch.FloatTensor, optional
             A scalar loss to be optimised.
         """
-        input_ids = tokens[self._index]
-        token_type_ids = tokens[f"{self._index}-type-ids"]
+        inputs = tokens[self._index]
+        input_ids = inputs["input_ids"]
+        token_type_ids = inputs["token_type_ids"]
         input_mask = (input_ids != 0).long()
 
-        _, pooled = self.bert_model(
+        _, pooled, *_ = self.bert_model(
             input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=input_mask
         )
 
@@ -139,7 +137,7 @@ class BertForClassification(Model):
     def decode(self, output_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
         Does a simple argmax over the probabilities, converts index to string label, and
-        add ``"label"`` key to the dictionary with the result.
+        add `"label"` key to the dictionary with the result.
         """
         predictions = output_dict["probs"]
         if predictions.dim() == 2:

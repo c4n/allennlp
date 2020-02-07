@@ -32,7 +32,7 @@ def render_file(relative_src_path: str, src_file: str, to_file: str, modifier="+
     print(f"Built docs for {src_file}: {to_file}")
 
 
-def build_docs_for_file(relative_path: str, file_name: str, docs_dir: str,) -> Dict[str, str]:
+def build_docs_for_file(relative_path: str, file_name: str, docs_dir: str) -> Dict[str, str]:
     """
     Build docs for an individual python file.
     """
@@ -69,6 +69,7 @@ def build_docs(root_path: str, docs_dir: str):
             nav_subsection = build_docs(relative_path, docs_dir)
             if not nav_subsection:
                 continue
+            nav_subsection.sort(key=lambda x: list(x)[0], reverse=False)
             nav_root.append({child: nav_subsection})
 
         else:

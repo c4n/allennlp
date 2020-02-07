@@ -5,9 +5,9 @@ not the only way to do multi-task training using AllenNLP.
 
 Note that you could almost fit this whole setup into
 the "SingleTaskTrainer" paradigm, if you just wrote like a
-``MinglingDatasetReader`` that wrapped multiple dataset readers.
-The main problem is that the ``SingleTaskTrainer`` expects
-a single ``train_path``. (Even that you could fudge by passing
+`MinglingDatasetReader` that wrapped multiple dataset readers.
+The main problem is that the `SingleTaskTrainer` expects
+a single `train_path`. (Even that you could fudge by passing
 in a Dict[str, str] serialized as JSON, but that's really hacky.)
 """
 from typing import List, Dict, Iterable, Any, Set
@@ -17,11 +17,11 @@ import os
 import tqdm
 import torch
 
-from allennlp.common import Registrable
+from allennlp.common import Lazy, Registrable
 from allennlp.common.params import Params
 from allennlp.common.testing import AllenNlpTestCase
 from allennlp.data import Instance
-from allennlp.data.dataset import Batch
+from allennlp.data.batch import Batch
 from allennlp.data.iterators import DataIterator
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data.fields import TextField, MetadataField
@@ -38,7 +38,7 @@ from allennlp.training.trainer_base import TrainerBase
 class MyReader(DatasetReader):
     """
     Just reads in a text file and sticks each line
-    in a ``TextField`` with the specified name.
+    in a `TextField` with the specified name.
     """
 
     def __init__(self, field_name: str) -> None:
@@ -60,11 +60,11 @@ class MyReader(DatasetReader):
 
 class DatasetMingler(Registrable):
     """
-    Our ``DataIterator`` class expects a single dataset;
+    Our `DataIterator` class expects a single dataset;
     this is an abstract class for combining multiple datasets into one.
 
     You could imagine an alternate design where there is a
-    ``MinglingDatasetReader`` that wraps multiple dataset readers,
+    `MinglingDatasetReader` that wraps multiple dataset readers,
     but then somehow you'd have to get it multiple file paths.
     """
 
@@ -75,7 +75,7 @@ class DatasetMingler(Registrable):
 @DatasetMingler.register("round-robin")
 class RoundRobinMingler(DatasetMingler):
     """
-    Cycle through datasets, ``take_at_time`` instances at a time.
+    Cycle through datasets, `take_at_time` instances at a time.
     """
 
     def __init__(self, dataset_name_field: str = "dataset", take_at_a_time: int = 1) -> None:
@@ -104,7 +104,7 @@ class HomogeneousBatchIterator(DataIterator):
     An iterator that takes instances of various types
     and yields single-type batches of them. There's a flag
     to allow mixed-type batches, but at that point you might
-    as well just use ``BasicIterator``?
+    as well just use `BasicIterator`?
     """
 
     def __init__(
@@ -165,18 +165,18 @@ class MyModel(Model):
 
         loss = torch.tensor(0.0)
         if dataset[0] == "a":
-            loss += field_a["tokens"].sum() * self.weight
+            loss += field_a["tokens"]["tokens"].sum() * self.weight
         elif dataset[0] == "b":
-            loss -= field_b["tokens"].sum() * self.weight ** 2
+            loss -= field_b["tokens"]["tokens"].sum() * self.weight ** 2
         elif dataset[0] == "c":
-            loss += field_c["tokens"].sum() * self.weight ** 3
+            loss += field_c["tokens"]["tokens"].sum() * self.weight ** 3
         else:
             raise ValueError(f"unknown dataset: {dataset[0]}")
 
         return {"loss": loss}
 
 
-@TrainerBase.register("multi-task-test")
+@TrainerBase.register("multi-task-test", constructor="from_partial_objects")
 class MultiTaskTrainer(TrainerBase):
     """
     A simple trainer that works in our multi-task setup.
@@ -240,40 +240,33 @@ class MultiTaskTrainer(TrainerBase):
         return {}
 
     @classmethod
-    def from_params(  # type: ignore
+    def from_partial_objects(
         cls,
-        params: Params,
         serialization_dir: str,
-        recover: bool = False,
-        cache_directory: str = None,
-        cache_prefix: str = None,
+        train_dataset_readers: Dict[str, DatasetReader],
+        train_file_paths: Dict[str, str],
+        model: Lazy[Model],
+        iterator: DataIterator,
+        mingler: DatasetMingler,
+        optimizer: Lazy[Optimizer],
+        num_epochs: int = 10,
     ) -> "MultiTaskTrainer":
-        readers = {
-            name: DatasetReader.from_params(reader_params)
-            for name, reader_params in params.pop("train_dataset_readers").items()
-        }
-        train_file_paths = params.pop("train_file_paths").as_dict()
 
-        datasets = {name: reader.read(train_file_paths[name]) for name, reader in readers.items()}
+        datasets = {
+            name: reader.read(train_file_paths[name])
+            for name, reader in train_dataset_readers.items()
+        }
 
         instances = (instance for dataset in datasets.values() for instance in dataset)
-        vocab = Vocabulary.from_params(Params({}), instances)
-        model = Model.from_params(params.pop("model"), vocab=vocab)
-        iterator = DataIterator.from_params(params.pop("iterator"))
+        vocab = Vocabulary.from_instances(instances=instances)
+        model = model.construct(vocab=vocab)
         iterator.index_with(vocab)
-        mingler = DatasetMingler.from_params(params.pop("mingler"))
 
         parameters = [[n, p] for n, p in model.named_parameters() if p.requires_grad]
-        optimizer = Optimizer.from_params(parameters, params.pop("optimizer"))
-
-        num_epochs = params.pop_int("num_epochs", 10)
-
-        _ = params.pop("trainer", Params({}))
-
-        params.assert_empty(__name__)
+        optimizer_ = optimizer.construct(model_parameters=parameters)
 
         return MultiTaskTrainer(
-            model, serialization_dir, iterator, mingler, optimizer, datasets, num_epochs
+            model, serialization_dir, iterator, mingler, optimizer_, datasets, num_epochs
         )
 
 
@@ -297,11 +290,11 @@ class MultiTaskTest(AllenNlpTestCase):
                     "b": self.FIXTURES_ROOT / "data" / "conll2000.txt",
                     "c": self.FIXTURES_ROOT / "data" / "conll2003.txt",
                 },
-                "trainer": {"type": "multi-task-test"},
+                "type": "multi-task-test",
             }
         )
 
-        self.trainer = TrainerBase.from_params(params, self.TEST_DIR)
+        self.trainer = TrainerBase.from_params(params=params, serialization_dir=self.TEST_DIR)
 
     def test_training(self):
         self.trainer.train()

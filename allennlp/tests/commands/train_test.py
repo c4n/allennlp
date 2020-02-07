@@ -1,22 +1,22 @@
 import argparse
-from typing import Iterable
-from collections import OrderedDict
 import json
 import os
-import shutil
 import re
+import shutil
+from collections import OrderedDict
+from typing import Iterable
 
 import pytest
 import torch
 
-from allennlp.models.archival import CONFIG_NAME
+from allennlp.commands.train import Train, TrainModel, train_model, train_model_from_args
 from allennlp.common import Params
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.testing import AllenNlpTestCase
-from allennlp.commands.train import Train, train_model, train_model_from_args
-from allennlp.data import DatasetReader, Instance
-from allennlp.data.vocabulary import Vocabulary
+from allennlp.data import DatasetReader, Instance, Vocabulary
 from allennlp.models import load_archive
+from allennlp.models.archival import CONFIG_NAME
+from allennlp.modules.token_embedders.embedding import _read_pretrained_embeddings_file
 
 SEQUENCE_TAGGING_DATA_PATH = str(AllenNlpTestCase.FIXTURES_ROOT / "data" / "sequence_tagging.tsv")
 
@@ -177,7 +177,9 @@ class TestTrain(AllenNlpTestCase):
             {
                 "model": {
                     "type": "simple_tagger",
-                    "text_field_embedder": {"tokens": {"type": "embedding", "embedding_dim": 5}},
+                    "text_field_embedder": {
+                        "token_embedders": {"tokens": {"type": "embedding", "embedding_dim": 5}}
+                    },
                     "encoder": {"type": "lstm", "input_size": 5, "hidden_size": 7, "num_layers": 2},
                 },
                 "dataset_reader": {"type": "sequence_tagging"},
@@ -220,7 +222,7 @@ class TestTrain(AllenNlpTestCase):
     def test_train_args(self):
         parser = argparse.ArgumentParser(description="Testing")
         subparsers = parser.add_subparsers(title="Commands", metavar="")
-        Train().add_subparser("train", subparsers)
+        Train().add_subparser(subparsers)
 
         for serialization_arg in ["-s", "--serialization-dir"]:
             raw_args = ["train", "path/to/params", serialization_arg, "serialization_dir"]
@@ -240,6 +242,14 @@ class TestTrain(AllenNlpTestCase):
         with self.assertRaises(SystemExit) as cm:
             args = parser.parse_args(["train", "path/to/params"])
             assert cm.exception.code == 2  # argparse code for incorrect usage
+
+    def test_train_model_can_instantiate_from_params(self):
+        params = Params.from_file(self.FIXTURES_ROOT / "simple_tagger" / "experiment.json")
+
+        # Can instantiate from base class params
+        TrainModel.from_params(
+            params=params, serialization_dir=self.TEST_DIR, local_rank=0, batch_weight_key=""
+        )
 
 
 @DatasetReader.register("lazy-test")
@@ -333,45 +343,47 @@ class TestTrainOnLazyDataset(AllenNlpTestCase):
         params = params_get()
         params["trainer"]["no_grad"] = ["*"]
         shutil.rmtree(serialization_dir, ignore_errors=True)
-        with pytest.raises(Exception) as _:
-            model = train_model(params, serialization_dir=serialization_dir)
+        with pytest.raises(Exception):
+            train_model(params, serialization_dir=serialization_dir)
 
-    def test_vocab_extended_model_with_transferred_embedder_is_loadable(self):
-        # Train on snli2 but load text_field_embedder and vocab from the model
-        # trained on snli (snli2 has one extra token over snli).
-        # Make sure (1) embedding extension happens implicitly.
-        #           (2) model dumped in such a way is loadable.
-        # (1) corresponds to model.extend_embedder_vocab() in trainer.py
-        # (2) corresponds to model.extend_embedder_vocab() in model.py
-        config_file = str(self.FIXTURES_ROOT / "decomposable_attention" / "experiment.json")
-        model_archive = str(
+
+class TestFineTune(AllenNlpTestCase):
+    def setUp(self):
+        super().setUp()
+        self.model_archive = str(
             self.FIXTURES_ROOT / "decomposable_attention" / "serialization" / "model.tar.gz"
         )
-        serialization_dir = str(self.TEST_DIR / "train")
+        self.config_file = str(self.FIXTURES_ROOT / "decomposable_attention" / "experiment.json")
+        self.serialization_dir = str(self.TEST_DIR / "fine_tune")
 
-        params = Params.from_file(config_file).as_dict()
-
-        snli_vocab_path = str(self.FIXTURES_ROOT / "data" / "snli_vocab")
-        params["train_data_path"] = str(self.FIXTURES_ROOT / "data" / "snli2.jsonl")
-        params["model"]["text_field_embedder"] = {
-            "_pretrained": {"archive_file": model_archive, "module_path": "_text_field_embedder"}
-        }
-        params["vocabulary"] = {"directory_path": snli_vocab_path, "extend": True}
-
-        original_vocab = Vocabulary.from_files(snli_vocab_path)
-
-        original_model = load_archive(model_archive).model
-        original_weight = original_model._text_field_embedder.token_embedder_tokens.weight
-
-        transferred_model = train_model(Params(params), serialization_dir=serialization_dir)
-
-        assert original_vocab.get_vocab_size("tokens") == 24
-        assert transferred_model.vocab.get_vocab_size("tokens") == 25
-
-        extended_weight = transferred_model._text_field_embedder.token_embedder_tokens.weight
-        assert original_weight.shape[0] + 1 == extended_weight.shape[0] == 25
-        assert torch.all(original_weight == extended_weight[:24, :])
-
-        # Check that such a dumped model is loadable
-        # self.serialization_dir = self.TEST_DIR / 'fine_tune'
-        load_archive(str(self.TEST_DIR / "train" / "model.tar.gz"))
+    def test_fine_tune_nograd_regex(self):
+        original_model = load_archive(self.model_archive).model
+        name_parameters_original = dict(original_model.named_parameters())
+        regex_lists = [
+            [],
+            [".*attend_feedforward.*", ".*token_embedder.*"],
+            [".*compare_feedforward.*"],
+        ]
+        for regex_list in regex_lists:
+            params = Params.from_file(self.config_file)
+            params["trainer"]["no_grad"] = regex_list
+            shutil.rmtree(self.serialization_dir, ignore_errors=True)
+            tuned_model = train_model(
+                model=original_model, params=params, serialization_dir=self.serialization_dir
+            )
+            # If regex is matched, parameter name should have requires_grad False
+            # If regex is matched, parameter name should have same requires_grad
+            # as the originally loaded model
+            for name, parameter in tuned_model.named_parameters():
+                if any(re.search(regex, name) for regex in regex_list):
+                    assert not parameter.requires_grad
+                else:
+                    assert parameter.requires_grad == name_parameters_original[name].requires_grad
+        # If all parameters have requires_grad=False, then error.
+        with pytest.raises(Exception) as _:
+            params = Params.from_file(self.config_file)
+            params["trainer"]["no_grad"] = ["*"]
+            shutil.rmtree(self.serialization_dir, ignore_errors=True)
+            train_model(
+                model=original_model, params=params, serialization_dir=self.serialization_dir
+            )

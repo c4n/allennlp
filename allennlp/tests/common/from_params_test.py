@@ -6,7 +6,7 @@ import torch
 from allennlp.common import Params
 from allennlp.common.from_params import FromParams, takes_arg, remove_optional, create_kwargs
 from allennlp.common.testing import AllenNlpTestCase
-from allennlp.data.tokenizers import Tokenizer
+from allennlp.data import DatasetReader, Tokenizer
 from allennlp.models import Model
 from allennlp.models.archival import load_archive
 from allennlp.common.checks import ConfigurationError
@@ -68,7 +68,7 @@ class TestFromParams(AllenNlpTestCase):
         assert my_class.my_bool
 
     def test_create_kwargs(self):
-        kwargs = create_kwargs(MyClass, Params({"my_int": 5}), my_bool=True, my_float=4.4)
+        kwargs = create_kwargs(MyClass, MyClass, Params({"my_int": 5}), my_bool=True, my_float=4.4)
 
         # my_float should not be included because it's not a param of the MyClass constructor
         assert kwargs == {"my_int": 5, "my_bool": True}
@@ -93,7 +93,7 @@ class TestFromParams(AllenNlpTestCase):
 
             # custom from params
             @classmethod
-            def from_params(cls, params: Params, size: int) -> "C":  # type: ignore
+            def from_params(cls, params: Params, size: int, **extras) -> "C":  # type: ignore
                 name = params.pop("name")
                 return cls(size=size, name=name)
 
@@ -148,7 +148,7 @@ class TestFromParams(AllenNlpTestCase):
                 return self.b == other.b
 
             @classmethod
-            def from_params(cls, params: Params, a: int) -> "A":  # type: ignore
+            def from_params(cls, params: Params, a: int, **extras) -> "A":  # type: ignore
                 # A custom from params
                 b = params.pop_int("b")
                 val = params.pop("val", "C")
@@ -162,7 +162,7 @@ class TestFromParams(AllenNlpTestCase):
                 self.b = b
 
             @classmethod
-            def from_params(cls, params: Params, c: int) -> "B":  # type: ignore
+            def from_params(cls, params: Params, c: int, **extras) -> "B":  # type: ignore
                 b = params.pop_int("b")
                 params.assert_empty(cls.__name__)
                 return cls(c=c, b=b)
@@ -276,12 +276,6 @@ class TestFromParams(AllenNlpTestCase):
                 # this test we'll ignore that.
                 self.b = b
 
-        class C(FromParams):
-            def __init__(self, c: Union[A, B, Dict[str, A]]) -> None:
-                # Really you would want to be sure that `self.c` has a consistent type, but for
-                # this test we'll ignore that.
-                self.c = c
-
         params = Params({"a": 3})
         a = A.from_params(params)
         assert a.a == 3
@@ -300,6 +294,23 @@ class TestFromParams(AllenNlpTestCase):
         assert isinstance(b.b, list)
         assert b.b[0].a == 3
         assert b.b[1].a == [4, 5]
+
+    def test_crazy_nested_union(self):
+        class A(FromParams):
+            def __init__(self, a: Union[int, List[int]]) -> None:
+                self.a = a
+
+        class B(FromParams):
+            def __init__(self, b: Union[A, List[A]]) -> None:
+                # Really you would want to be sure that `self.b` has a consistent type, but for
+                # this test we'll ignore that.
+                self.b = b
+
+        class C(FromParams):
+            def __init__(self, c: Union[A, B, Dict[str, A]]) -> None:
+                # Really you would want to be sure that `self.c` has a consistent type, but for
+                # this test we'll ignore that.
+                self.c = c
 
         # This is a contrived, ugly example (why would you want to duplicate names in a nested
         # structure like this??), but it demonstrates a potential bug when dealing with mutatable
@@ -545,3 +556,79 @@ class TestFromParams(AllenNlpTestCase):
         }
         with pytest.raises(ConfigurationError):
             Model.from_params(vocab=trained_model.vocab, params=Params(model_params))
+
+    def test_kwargs_are_passed_to_superclass(self):
+        params = Params(
+            {"type": "text_classification_json", "lazy": True, "cache_directory": "tmp"}
+        )
+        reader = DatasetReader.from_params(params)
+        assert reader.lazy is True
+        assert str(reader._cache_directory) == "tmp"
+
+    def test_only_infer_superclass_params_if_unknown(self):
+
+        from allennlp.common.registrable import Registrable
+
+        class BaseClass(Registrable):
+            def __init__(self):
+                self.x = None
+                self.a = None
+                self.rest = None
+
+        @BaseClass.register("a")
+        class A(BaseClass):
+            def __init__(self, a: int, x: int, **kwargs):
+                super().__init__()
+                self.x = x
+                self.a = a
+                self.rest = kwargs
+
+        @BaseClass.register("b")
+        class B(A):
+            def __init__(self, a: str, x: int = 42, **kwargs):
+                super().__init__(x=x, a=-1, raw_a=a, **kwargs)
+
+        params = Params({"type": "b", "a": "123"})
+        # The param `x` should not be required as it has default value in `B`
+        # The correct type of the param `a` should be inferred from `B` as well.
+        instance = BaseClass.from_params(params)
+        assert instance.x == 42
+        assert instance.a == -1
+        assert len(instance.rest) == 1
+        assert type(instance.rest["raw_a"]) == str
+        assert instance.rest["raw_a"] == "123"
+
+    def test_kwargs_are_passed_to_deeper_superclasses(self):
+
+        from allennlp.common.registrable import Registrable
+
+        class BaseClass(Registrable):
+            def __init__(self):
+                self.a = None
+                self.b = None
+                self.c = None
+
+        @BaseClass.register("a")
+        class A(BaseClass):
+            def __init__(self, a: str):
+                super().__init__()
+                self.a = a
+
+        @BaseClass.register("b")
+        class B(A):
+            def __init__(self, b: str, **kwargs):
+                super().__init__(**kwargs)
+                self.b = b
+
+        @BaseClass.register("c")
+        class C(B):
+            def __init__(self, c, **kwargs):
+                super().__init__(**kwargs)
+                self.c = c
+
+        params = Params({"type": "c", "a": "a_value", "b": "b_value", "c": "c_value"})
+
+        instance = BaseClass.from_params(params)
+        assert instance.a == "a_value"
+        assert instance.b == "b_value"
+        assert instance.c == "c_value"

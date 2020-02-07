@@ -16,11 +16,11 @@ class Metric(Registrable):
         """
         # Parameters
 
-        predictions : ``torch.Tensor``, required.
+        predictions : `torch.Tensor`, required.
             A tensor of predictions.
-        gold_labels : ``torch.Tensor``, required.
+        gold_labels : `torch.Tensor`, required.
             A tensor corresponding to some gold label to evaluate against.
-        mask : ``torch.Tensor``, optional (default = None).
+        mask : `torch.Tensor`, optional (default = None).
             A mask can be passed, in order to deal with metrics which are
             computed over potentially padded elements, such as sequence labels.
         """
@@ -30,7 +30,7 @@ class Metric(Registrable):
         self, reset: bool
     ) -> Union[float, Tuple[float, ...], Dict[str, float], Dict[str, List[float]]]:
         """
-        Compute and return the metric. Optionally also call :func:`self.reset`.
+        Compute and return the metric. Optionally also call `self.reset`.
         """
         raise NotImplementedError
 

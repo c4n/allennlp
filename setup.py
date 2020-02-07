@@ -50,8 +50,9 @@ run chmod 600 ./pypirc so only you can read/write.
 7. Copy the release notes from RELEASE.md to the tag in github once everything is looking hunky-dory.
 
 """
-from setuptools import setup, find_packages
 import sys
+
+from setuptools import find_packages, setup
 
 # PEP0440 compatible formatted version, see:
 # https://www.python.org/dev/peps/pep-0440/
@@ -103,7 +104,7 @@ setup(
     install_requires=[
         "torch>=1.2.0,!=1.3.0",
         "jsonnet>=0.10.0 ; sys.platform != 'win32'",
-        "overrides==2.0",
+        "overrides==2.8.0",
         "nltk",
         "spacy>=2.1.0,<2.3",
         "numpy",
@@ -114,18 +115,12 @@ setup(
         "h5py",
         "scikit-learn",
         "scipy",
-        "pytz>=2017.3",
-        "matplotlib>=2.2.3",
         "pytest",
         "flaky",
         "responses>=0.7",
-        "numpydoc>=0.8.0",
-        "conllu==1.3.1",
-        "ftfy",
-        "pytorch-pretrained-bert>=0.6.0",
-        "transformers>=2.1.1,!=2.2.1,!=2.2.2",
+        "conllu==2.2.2",
+        "transformers>=2.4.0",
         "jsonpickle",
-        "python-dateutil<2.8.1",
     ],
     entry_points={"console_scripts": ["allennlp=allennlp.run:run"]},
     setup_requires=setup_requirements,

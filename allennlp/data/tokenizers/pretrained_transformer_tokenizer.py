@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import Any, Dict, List, Tuple
 
 from allennlp.common.util import sanitize_wordpiece
 from overrides import overrides
@@ -14,42 +14,44 @@ logger = logging.getLogger(__name__)
 @Tokenizer.register("pretrained_transformer")
 class PretrainedTransformerTokenizer(Tokenizer):
     """
-    A ``PretrainedTransformerTokenizer`` uses a model from HuggingFace's
-    ``transformers`` library to tokenize some input text.  This often means wordpieces
-    (where ``'AllenNLP is awesome'`` might get split into ``['Allen', '##NL', '##P', 'is',
-    'awesome']``), but it could also use byte-pair encoding, or some other tokenization, depending
+    A `PretrainedTransformerTokenizer` uses a model from HuggingFace's
+    `transformers` library to tokenize some input text.  This often means wordpieces
+    (where `'AllenNLP is awesome'` might get split into `['Allen', '##NL', '##P', 'is',
+    'awesome']`), but it could also use byte-pair encoding, or some other tokenization, depending
     on the pretrained model that you're using.
 
     We take a model name as an input parameter, which we will pass to
-    ``AutoTokenizer.from_pretrained``.
+    `AutoTokenizer.from_pretrained`.
 
     We also add special tokens relative to the pretrained model and truncate the sequences.
 
-    This tokenizer also indexes tokens and adds the indexes to the ``Token`` fields so that
-    they can be picked up by ``PretrainedTransformerIndexer``.
+    This tokenizer also indexes tokens and adds the indexes to the `Token` fields so that
+    they can be picked up by `PretrainedTransformerIndexer`.
 
     # Parameters
 
-    model_name : ``str``
+    model_name : `str`
         The name of the pretrained wordpiece tokenizer to use.
-    add_special_tokens : ``bool``, optional, (default=True)
-        If set to ``True``, the sequences will be encoded with the special tokens relative
+    add_special_tokens : `bool`, optional, (default=True)
+        If set to `True`, the sequences will be encoded with the special tokens relative
         to their model.
-    max_length : ``int``, optional (default=None)
+    max_length : `int`, optional (default=None)
         If set to a number, will limit the total sequence returned so that it has a maximum length.
         If there are overflowing tokens, those will be added to the returned dictionary
-    stride : ``int``, optional (default=0)
+    stride : `int`, optional (default=0)
         If set to a number along with max_length, the overflowing tokens returned will contain some tokens
         from the main sequence returned. The value of this argument defines the number of additional tokens.
-    truncation_strategy : ``str``, optional (default='longest_first')
+    truncation_strategy : `str`, optional (default='longest_first')
         String selected in the following options:
         - 'longest_first' (default) Iteratively reduce the inputs sequence until the input is under max_length
         starting from the longest one at each token (when there is a pair of input sequences)
         - 'only_first': Only truncate the first sequence
         - 'only_second': Only truncate the second sequence
         - 'do_not_truncate': Do not truncate (raise an error if the input sequence is longer than max_length)
-    calculate_character_offsets : ``bool``, optional (default=False)
+    calculate_character_offsets : `bool`, optional (default=False)
         Attempts to reconstruct character offsets for the instances of Token that this tokenizer produces.
+    tokenizer_kwargs: 'Dict[str, Any]'
+        Dictionary with additional arguments for `AutoTokenizer.from_pretrained`.
 
     Argument descriptions are from
     https://github.com/huggingface/transformers/blob/155c782a2ccd103cf63ad48a2becd7c76a7d2115/transformers/tokenization_utils.py#L691
@@ -63,16 +65,18 @@ class PretrainedTransformerTokenizer(Tokenizer):
         stride: int = 0,
         truncation_strategy: str = "longest_first",
         calculate_character_offsets: bool = False,
+        tokenizer_kwargs: Dict[str, Any] = None,
     ) -> None:
-        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer_kwargs = tokenizer_kwargs or {}
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
 
         # Huggingface tokenizers have different ways of remembering whether they lowercase or not. Detecting it
         # this way seems like the least brittle way to do it.
-        tokenized = self._tokenizer.tokenize(
-            "FOO"
-        )  # Use a short word that's unlikely to be cut into word pieces.
+        tokenized = self.tokenizer.tokenize(
+            "A"
+        )  # Use a single character that won't be cut into word pieces.
         detokenized = " ".join(tokenized)
-        self._tokenizer_lowercases = "foo" in detokenized
+        self._tokenizer_lowercases = "a" in detokenized
 
         self._add_special_tokens = add_special_tokens
         self._max_length = max_length
@@ -80,12 +84,17 @@ class PretrainedTransformerTokenizer(Tokenizer):
         self._truncation_strategy = truncation_strategy
         self._calculate_character_offsets = calculate_character_offsets
 
+        (
+            self.num_added_start_tokens,
+            self.num_added_end_tokens,
+        ) = self._determine_num_special_tokens_added()
+
     def _tokenize(self, sentence_1: str, sentence_2: str = None):
         """
         This method works on both sentence and sentence pair.
         """
 
-        encoded_tokens = self._tokenizer.encode_plus(
+        encoded_tokens = self.tokenizer.encode_plus(
             text=sentence_1,
             text_pair=sentence_2,
             add_special_tokens=self._add_special_tokens,
@@ -99,20 +108,22 @@ class PretrainedTransformerTokenizer(Tokenizer):
 
         tokens = []
         for token_id, token_type_id in zip(token_ids, token_type_ids):
-            token_str = self._tokenizer.convert_ids_to_tokens(token_id, skip_special_tokens=False)
+            token_str = self.tokenizer.convert_ids_to_tokens(token_id, skip_special_tokens=False)
             tokens.append(Token(text=token_str, text_id=token_id, type_id=token_type_id))
 
         if self._calculate_character_offsets:
-            # The huggingface tokenizers produce tokens that may or may not be slices from the original text.
-            # Differences arise from lowercasing, Unicode normalization, and other kinds of normalization, as well
-            # as special characters that are included to denote various situations, such as "##" in BERT for word
-            # pieces from the middle of a word, or "Ġ" in RoBERTa for the beginning of words not at the start of a
-            # sentence.
-            # This code attempts to calculate character offsets while being tolerant to these differences. It
-            # scans through the text and the tokens in parallel, trying to match up positions in both. If it
-            # gets out of sync, it backs off to not adding any token indices, and attempts to catch back up
-            # afterwards. This procedure is approximate. Don't rely on precise results, especially in non-English
-            # languages that are far more affected by Unicode normalization.
+            # The huggingface tokenizers produce tokens that may or may not be slices from the
+            # original text.  Differences arise from lowercasing, Unicode normalization, and other
+            # kinds of normalization, as well as special characters that are included to denote
+            # various situations, such as "##" in BERT for word pieces from the middle of a word, or
+            # "Ġ" in RoBERTa for the beginning of words not at the start of a sentence.
+
+            # This code attempts to calculate character offsets while being tolerant to these
+            # differences. It scans through the text and the tokens in parallel, trying to match up
+            # positions in both. If it gets out of sync, it backs off to not adding any token
+            # indices, and attempts to catch back up afterwards. This procedure is approximate.
+            # Don't rely on precise results, especially in non-English languages that are far more
+            # affected by Unicode normalization.
 
             whole_text = sentence_1
             if sentence_2 is not None:
@@ -167,6 +178,73 @@ class PretrainedTransformerTokenizer(Tokenizer):
     def tokenize(self, text: str) -> List[Token]:
         """
         This method only handles a single sentence (or sequence) of text.
-        Refer to the ``tokenize_sentence_pair`` method if you have a sentence pair.
+        Refer to the `tokenize_sentence_pair` method if you have a sentence pair.
         """
         return self._tokenize(text)
+
+    def intra_word_tokenize(self, tokens: List[str]) -> Tuple[List[Token], List[Tuple[int, int]]]:
+        """
+        Tokenizes each word into wordpieces separately and returns the wordpiece IDs.
+        Also calculates offsets such that wordpices[offsets[i][0]:offsets[i][1] + 1]
+        corresponds to the original i-th token.
+
+        This function inserts special tokens.
+        """
+        wordpieces: List[int] = []
+        offsets = []
+        cumulative = self.num_added_start_tokens
+        for token in tokens:
+            subword_wordpieces = self.tokenizer.encode(token, add_special_tokens=False)
+            wordpieces.extend(subword_wordpieces)
+
+            start_offset = cumulative
+            cumulative += len(subword_wordpieces)
+            end_offset = cumulative - 1  # inclusive
+            offsets.append((start_offset, end_offset))
+
+        wordpieces = self.tokenizer.build_inputs_with_special_tokens(wordpieces)
+        assert cumulative + self.num_added_end_tokens == len(wordpieces)
+
+        texts = self.tokenizer.convert_ids_to_tokens(wordpieces)
+        # `create_token_type_ids_from_sequences()` inserts special tokens
+        type_ids = self.tokenizer.create_token_type_ids_from_sequences(
+            wordpieces[self.num_added_start_tokens : -self.num_added_end_tokens]
+        )
+
+        wp_tokens = [
+            Token(text, text_id=text_id, type_id=type_id)
+            for text, text_id, type_id in zip(texts, wordpieces, type_ids)
+        ]
+
+        return wp_tokens, offsets
+
+    def _determine_num_special_tokens_added(self) -> Tuple[int, int]:
+        """
+        Determines the number of tokens `tokenizer` adds to a sequence (currently doesn't
+        consider sequence pairs) in the start & end.
+
+        # Returns
+
+        The number of tokens (`int`) that are inserted in the start & end of a sequence.
+        """
+        # Uses a slightly higher index to avoid tokenizer doing special things to lower-indexed
+        # tokens which might be special.
+        dummy = [1000]
+        inserted = self.tokenizer.build_inputs_with_special_tokens(dummy)
+
+        num_start = num_end = 0
+        seen_dummy = False
+        for idx in inserted:
+            if idx == dummy[0]:
+                if seen_dummy:  # seeing it twice
+                    raise ValueError("Cannot auto-determine the number of special tokens added.")
+                seen_dummy = True
+                continue
+
+            if not seen_dummy:
+                num_start += 1
+            else:
+                num_end += 1
+
+        assert num_start + num_end == self.tokenizer.num_added_tokens()
+        return num_start, num_end

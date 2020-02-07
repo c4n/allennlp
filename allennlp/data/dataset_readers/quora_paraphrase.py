@@ -28,25 +28,18 @@ class QuoraParaphraseDatasetReader(DatasetReader):
 
     # Parameters
 
-    lazy : ``bool`` (optional, default=False)
-        Passed to ``DatasetReader``.  If this is ``True``, training will start sooner, but will
-        take longer per batch.  This also allows training with datasets that are too large to fit
-        in memory.
-    tokenizer : ``Tokenizer``, optional
+    tokenizer : `Tokenizer`, optional
         Tokenizer to use to split the premise and hypothesis into words or other kinds of tokens.
-        Defaults to ``WhitespaceTokenizer``.
-    token_indexers : ``Dict[str, TokenIndexer]``, optional
-        Indexers used to define input token representations. Defaults to ``{"tokens":
-        SingleIdTokenIndexer()}``.
+        Defaults to `WhitespaceTokenizer`.
+    token_indexers : `Dict[str, TokenIndexer]`, optional
+        Indexers used to define input token representations. Defaults to `{"tokens":
+        SingleIdTokenIndexer()}`.
     """
 
     def __init__(
-        self,
-        lazy: bool = False,
-        tokenizer: Tokenizer = None,
-        token_indexers: Dict[str, TokenIndexer] = None,
+        self, tokenizer: Tokenizer = None, token_indexers: Dict[str, TokenIndexer] = None, **kwargs,
     ) -> None:
-        super().__init__(lazy)
+        super().__init__(**kwargs)
         self._tokenizer = tokenizer or WhitespaceTokenizer()
         self._token_indexers = token_indexers or {"tokens": SingleIdTokenIndexer()}
 
