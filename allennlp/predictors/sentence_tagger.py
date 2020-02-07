@@ -85,12 +85,13 @@ class SentenceTaggerPredictor(Predictor):
                 ]
                 predicted_spans.append(current_tags)
             i += 1
-        #To prevent error, when there are no NEs. 
+        # To prevent error, when there are no NEs.
         if len(predicted_spans) == 0:
-            current_tags = [t if idx == i else "O" for idx, t in enumerate(predicted_tags)]
+            current_tags = ["O" for idx, t in enumerate(predicted_tags)]
             predicted_spans.append(current_tags)
         # Creates a new instance for each contiguous tag
         instances = []
+           
         for labels in predicted_spans:
             new_instance = deepcopy(instance)
             text_field: TextField = instance["tokens"]  # type: ignore

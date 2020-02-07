@@ -26,7 +26,7 @@ DEFAULT_IGNORE_TOKENS = ["@@NULL@@", ".", ",", ";", "!", "?", "[MASK]", "[SEP]",
 CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 # note :
 # hotflip isalnum is used to exclude alphnumeric string
-# @Attacker.register("my_hotflip")
+@Attacker.register("my_hotflip")
 class MyHotflip(Attacker):
     """
     Runs the HotFlip style attack at the word-level https://arxiv.org/abs/1712.06751.  We use the
@@ -353,6 +353,7 @@ class MyHotflip(Attacker):
             instance.indexed = False
 
             # Get model predictions on instance, and then label the instances
+            ###NO OUTPUT VERSION FOR TRAINING ONLY
             grads, outputs = self.predictor.get_gradients([instance])  # predictions
 
             for key, output in outputs.items():
@@ -366,7 +367,7 @@ class MyHotflip(Attacker):
             adv_labeled_instances = self.predictor.predictions_to_labeled_instances(
                 instance, outputs
             )
-
+            
             # If we've met our stopping criterion, we stop.
             for adv_labeled_instance in adv_labeled_instances:
                 has_changed = utils.instance_has_changed(adv_labeled_instance, fields_to_compare)
@@ -383,8 +384,10 @@ class MyHotflip(Attacker):
                 break
 
         final_tokens.append(text_field.tokens)
-
+        #no output version for training only
         return sanitize({"final": final_tokens, "original": original_tokens, "outputs": outputs})
+
+#         return sanitize({"final": final_tokens, "original": original_tokens, "outputs": outputs})
 
     def attack_from_json(
         self,
@@ -436,7 +439,7 @@ class MyHotflip(Attacker):
         #         # _towards_ the target.
         #         sign = -1 if target is None else 1
         instance = self.predictor._json_to_instance(inputs)
-
+        return self.oneshot_attack_from_instance(instance)
         return self.attack_from_instance(instance)
 
     def _first_order_taylor(
@@ -492,3 +495,139 @@ class MyHotflip(Attacker):
             return word_list
         else:
             return [w_original]
+
+        
+    def oneshot_attack_from_instance(
+        self,
+        input_instance: Instance,
+        input_field_to_attack: str = "tokens",
+        grad_input_field: str = "grad_input_1",
+        ignore_tokens: List[str] = None,
+        target: JsonDict = None,
+    ) -> JsonDict:
+        """
+        Replaces one token at a time from the input until the model's prediction changes.
+        ``input_field_to_attack`` is for example ``tokens``, it says what the input field is
+        called.  ``grad_input_field`` is for example ``grad_input_1``, which is a key into a grads
+        dictionary.
+
+        The method computes the gradient w.r.t. the tokens, finds the token with the maximum
+        gradient (by L2 norm), and replaces it with another token based on the first-order Taylor
+        approximation of the loss.  This process is iteratively repeated until the prediction
+        changes.  Once a token is replaced, it is not flipped again.
+
+        """
+        if self.embedding_matrix is None:
+            self.initialize()
+        ignore_tokens = DEFAULT_IGNORE_TOKENS if ignore_tokens is None else ignore_tokens
+
+        # If `target` is `None`, we move away from the current prediction, otherwise we move
+        # _towards_ the target.
+        sign = -1 if target is None else 1
+
+        if target is None:
+            output_dict = self.predictor._model.forward_on_instance(input_instance)
+        else:
+            output_dict = target
+
+        # This now holds the predictions that we want to change (either away from or towards,
+        # depending on whether `target` was passed).  We'll use this in the loop below to check for
+        # when we've met our stopping criterion.
+
+        #         original_instances = self.predictor.predictions_to_labeled_instances(input_instance, output_dict)
+        # This is just for ease of access in the UI, so we know the original tokens.  It's not used
+        # in the logic below.
+
+        ###my mod: all tags###
+        text_field: TextField = input_instance["tokens"]
+        input_instance.add_field(
+            "tags", SequenceLabelField(output_dict["tags"], text_field), self.predictor._model.vocab
+        )
+        original_text_field: TextField = input_instance[  # type: ignore
+            input_field_to_attack
+        ]
+        ###my mod: all tags###
+        #         original_text_field: TextField = original_instances[0][  # type: ignore
+        #             input_field_to_attack
+        #         ]
+        original_tokens = deepcopy(original_text_field.tokens)
+
+        # if all tags are Os, don't attack.
+        if all(tag == "O" for tag in output_dict["tags"]):
+            return sanitize({"final": [original_tokens], "original": original_tokens})
+
+        final_tokens = []
+        # `original_instances` is a list because there might be several different predictions that
+        # we're trying to attack (e.g., all of the NER tags for an input sentence).  We attack them
+        # one at a time.
+        #         instance = random.choice(original_instances)
+
+        instance = deepcopy(input_instance)
+
+        # Gets a list of the fields that we want to check to see if they change.
+        fields_to_compare = utils.get_fields_to_compare_instance(
+            input_instance, instance, input_field_to_attack
+        )
+
+        # We'll be modifying the tokens in this text field below, and grabbing the modified
+        # list after the `while` loop.
+        text_field: TextField = instance[input_field_to_attack]  # type: ignore
+
+        # Because we can save computation by getting grads and outputs at the same time, we do
+        # them together at the end of the loop, even though we use grads at the beginning and
+        # outputs at the end.  This is our initial gradient for the beginning of the loop.  The
+        # output can be ignored here.
+        grads, outputs = self.predictor.get_gradients([instance])
+
+        # Ignore any token that is in the ignore_tokens list by setting the token to already
+        # flipped.
+        flipped: List[int] = []
+        for index, token in enumerate(text_field.tokens):
+            if token.text in ignore_tokens or len(token.text) <= 3:
+                flipped.append(index)
+
+                        
+        # Compute L2 norm of all grads.
+        grad = grads[grad_input_field][0]
+        grads_magnitude = [g.dot(g) for g in grad]
+
+        while True:
+
+            # only flip a token once
+            for index in flipped:
+                grads_magnitude[index] = -1
+
+            # We flip the token with highest gradient norm.
+            index_of_token_to_flip = numpy.argmax(grads_magnitude)
+            if grads_magnitude[index_of_token_to_flip] == -1:
+                # If we've already flipped all of the tokens, we give up.
+                break
+            flipped.append(index_of_token_to_flip)
+
+            # TODO(mattg): This is quite a bit of a hack for getting the vocab id...  I don't
+            # have better ideas at the moment, though.
+            indexer_name = self.namespace
+            input_tokens = text_field._indexed_tokens[indexer_name]
+            original_id_of_token_to_flip = input_tokens[index_of_token_to_flip]
+            token_to_flip = text_field.tokens[index_of_token_to_flip]
+
+            # Get new token using taylor approximation.
+            new_word = self._first_order_taylor(
+                grad[index_of_token_to_flip], original_id_of_token_to_flip, token_to_flip, sign
+            )
+
+            # Flip token.  We need to tell the instance to re-index itself, so the text field
+            # will actually update.
+            new_token = Token(
+                new_word
+                #                     self.vocab._index_to_token[self.namespace][new_id]
+            )  # type: ignore
+            text_field.tokens[index_of_token_to_flip] = new_token
+            instance.indexed = False
+
+
+        final_tokens.append(text_field.tokens)
+        #no output version for training only
+        return sanitize({"final": final_tokens, "original": original_tokens})
+
+#         return sanitize({"final": final_tokens, "original": original_tokens, "outputs": outputs})

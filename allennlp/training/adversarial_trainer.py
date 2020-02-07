@@ -4,7 +4,7 @@ import math
 import os
 import time
 import traceback
-from typing import Dict, Optional, Tuple, Union, Iterable, Any
+from typing import Dict, Optional, Tuple, Union, Iterable, Any, List
 
 import torch
 import torch.distributed as dist
@@ -35,17 +35,19 @@ from allennlp.predictors.sentence_tagger import SentenceTaggerPredictor
 from allennlp.data import DatasetReader, Instance
 from allennlp.data.tokenizers import Token
 import copy
+import random
 
 logger = logging.getLogger(__name__)
 
 
-@TrainerBase.register("adversarial")
+@TrainerBase.register("adversarial_trainer", constructor="from_partial_objects")
 class AdversarialTrainer(TrainerBase):
     def __init__(
         self,
         model: Model,
         optimizer: torch.optim.Optimizer,
         iterator: DataIterator,
+        dataset_reader : DatasetReader,
         train_dataset: Iterable[Instance],
         validation_dataset: Optional[Iterable[Instance]] = None,
         patience: Optional[int] = None,
@@ -73,8 +75,8 @@ class AdversarialTrainer(TrainerBase):
         rank: int = 0,
         world_size: int = 1,
         num_gradient_accumulation_steps: int = 1,
-        attacker: Attacker = None,
-        reader: DatasetReader = None,
+        attacker : Attacker = None,
+      
     ) -> None:
         """
         A trainer for doing supervised learning. It just takes a labeled dataset
@@ -212,11 +214,16 @@ class AdversarialTrainer(TrainerBase):
         self.shuffle = shuffle
         self.optimizer = optimizer
         self.train_data = train_dataset
+        self.train_data_original = train_dataset
         self._validation_data = validation_dataset
-
+        
         ## additional stuffs for adv. attack
         self.attacker = attacker
-        self.reader = reader
+        self.dataset_reader = dataset_reader
+        self.validation_metric = validation_metric
+        
+        self.adv_data = []
+        self.attack_flag = False
         #####
 
         if patience is None:  # no early stopping
@@ -416,7 +423,9 @@ class AdversarialTrainer(TrainerBase):
                     )
             else:
                 self.optimizer.step()
-
+                
+   
+            
             #####orginal code####
             # Update moving averages
             if self._moving_average is not None:
@@ -480,13 +489,14 @@ class AdversarialTrainer(TrainerBase):
         for (gpu_num, memory) in gpu_usage:
             metrics["gpu_" + str(gpu_num) + "_memory_MB"] = memory
 
+            
         return metrics
-
-    def _attack_epoch(self, epoch: int) -> Dict[str, float]:
+    
+    def _attack_epoch(self, epoch: int) -> Tuple[Dict[str, float], List[Instance]]:
         """
         Trains one epoch and returns metrics.
         """
-        logger.info("Epoch %d/%d", epoch, self._num_epochs - 1)
+        logger.info("Adversarial at Epoch %d/%d", epoch, self._num_epochs - 1)
         peak_cpu_usage = peak_memory_mb()
         logger.info(f"Peak CPU memory usage MB: {peak_cpu_usage}")
         gpu_usage = []
@@ -494,181 +504,41 @@ class AdversarialTrainer(TrainerBase):
             gpu_usage.append((gpu, memory))
             logger.info(f"GPU {gpu} memory usage MB: {memory}")
 
-        train_loss = 0.0
-        # Set the model to "train" mode.
-        self._pytorch_model.train()
+        adv_loss = 0.0
+        # Set the model to "eval" mode.
+        self._pytorch_model.eval()
 
-        # Get tqdm for the training batches
-        batch_generator = self.iterator(self.train_data, num_epochs=1, shuffle=self.shuffle)
-        batch_group_generator = lazy_groups_of(
-            batch_generator, self._num_gradient_accumulation_steps
-        )
-        num_training_batches = math.ceil(
-            self.iterator.get_num_batches(self.train_data) / self._num_gradient_accumulation_steps
-        )
-        # Having multiple tqdm bars in case of distributed training will be a mess. Hence only the master's
-        # progress is shown
-        if self._master:
-            batch_group_generator_tqdm = Tqdm.tqdm(
-                batch_group_generator, total=num_training_batches
-            )
-        else:
-            batch_group_generator_tqdm = batch_group_generator
 
-        self._last_log = time.time()
-        last_save_time = time.time()
-
-        batches_this_epoch = 0
-        if self._batch_num_total is None:
-            self._batch_num_total = 0
-
-        histogram_parameters = set(self.model.get_parameters_for_histogram_tensorboard_logging())
-
-        logger.info("Training")
-
-        cumulative_batch_group_size = 0
-        for batch_group in batch_group_generator_tqdm:
-            batches_this_epoch += 1
-            self._batch_num_total += 1
-            batch_num_total = self._batch_num_total
-
-            self.optimizer.zero_grad()
-
-            for batch in batch_group:
-                loss = self.batch_loss(batch, for_training=True)
-                if torch.isnan(loss):
-                    raise ValueError("nan loss encountered")
-                loss = loss / len(batch_group)
-                loss.backward()
-                train_loss += loss.item()
-
-            batch_grad_norm = self.rescale_gradients()
-
-            # This does nothing if batch_num_total is None or you are using a
-            # scheduler which doesn't update per batch.
-            if self._learning_rate_scheduler:
-                self._learning_rate_scheduler.step_batch(batch_num_total)
-            if self._momentum_scheduler:
-                self._momentum_scheduler.step_batch(batch_num_total)
-
-            if self._tensorboard.should_log_histograms_this_batch() and self._master:
-                # get the magnitude of parameter updates for logging
-                # We need a copy of current parameters to compute magnitude of updates,
-                # and copy them to CPU so large models won't go OOM on the GPU.
-                param_updates = {
-                    name: param.detach().cpu().clone()
-                    for name, param in self.model.named_parameters()
-                }
-                self.optimizer.step()
-                for name, param in self.model.named_parameters():
-                    param_updates[name].sub_(param.detach().cpu())
-                    update_norm = torch.norm(param_updates[name].view(-1))
-                    param_norm = torch.norm(param.view(-1)).cpu()
-                    self._tensorboard.add_train_scalar(
-                        "gradient_update/" + name, update_norm / (param_norm + 1e-7)
-                    )
-            else:
-                self.optimizer.step()
-
-        # Attack##
+        #Attack##
         if self.attacker != None:
-            # init
-            tagger = SentenceTaggerPredictor(self.model, self.reader)
+            #init
+            tagger = SentenceTaggerPredictor(self.model, self.dataset_reader)
             attacker = self.attacker(tagger, vocab_namespace="tokens")
             #
-            adv_dataset = []
+            adv_data = []
 
             logger.info("Attacking")
-            dataset_tqdm = Tqdm.tqdm(self.train_data)
+            dataset_tqdm = Tqdm.tqdm(self.train_data_original)
             for sample in dataset_tqdm:
-                # attack the model
-                new_sample = copy.deepcopy(
-                    sample
-                )  # make sure there's no reference to the original sample
-                attack = attacker.attack_from_instance(sample)
-                adversarial_tokens = [Token(word) for word in attack["final"][0]]
-                # get clean tag and create adversarial instance
-                clean_tags = sample.fields["tags"].labels
-                self.reader.coding_scheme = "BIOUL-adv"  # this is just a decoy, so the code doesn't convert the alreadt converted labels
-                adv_instance = self.reader.text_to_instance(
-                    tokens=adversarial_tokens, ner_tags=clean_tags
-                )
-                adv_instance.fields["tokens"].index(self.model.vocab)
-                adv_dataset.append(adv_instance)
-
+                #attack the model
+                if random.uniform(0, 1) < 0.5:
+                    new_sample  = copy.deepcopy(sample) #make sure there's no reference to the original sample
+                    attack = attacker.attack_from_instance(sample)
+                    adversarial_tokens = [Token(word) for word in attack['final'][0]]
+                    #get clean tag and create adversarial instance
+                    clean_tags = sample.fields['tags'].labels
+                    self.dataset_reader.coding_scheme = "BIOUL-adv" #this is just a decoy, so the code doesn't convert the alreadt converted labels
+                    adv_instance = self.dataset_reader.text_to_instance(tokens = adversarial_tokens, ner_tags = clean_tags )
+                    adv_instance.fields['tokens'].index(self.model.vocab)
+                    adv_data.append(adv_instance)
+#                 else:
+#                     adv_data.append(sample)
             ##eval attack###
-            adv_results = training_util.evaluate(self.model, adv_dataset, iterator, 0, None)
-            adv_results = dict(
-                ("adv_" + k, f(v) if hasattr(v, "keys") else v) for k, v in adv_results.items()
-            )
+            adv_results = training_util.evaluate(self.model, adv_data, self.iterator, 0, None )
+            adv_results = dict(("adv_"+k,f(v) if hasattr(v,'keys') else v) for k,v in adv_results.items())
             ##attack##
-
-            #####orginal code####
-            # Update moving averages
-            if self._moving_average is not None:
-                self._moving_average.apply(batch_num_total)
-
-            # Update the description with the latest metrics
-            metrics = training_util.get_metrics(
-                self.model,
-                train_loss,
-                batches_this_epoch,
-                world_size=self._world_size,
-                cuda_device=[self.cuda_device],
-            )
-
-            # Updating tqdm only for the master as the trainers wouldn't have one
-            if self._master:
-                description = training_util.description_from_metrics(metrics)
-                batch_group_generator_tqdm.set_description(description, refresh=False)
-
-            # Log parameter values to Tensorboard (only from the master)
-            if self._tensorboard.should_log_this_batch() and self._master:
-                self._tensorboard.log_parameter_and_gradient_statistics(self.model, batch_grad_norm)
-                self._tensorboard.log_learning_rates(self.model, self.optimizer)
-
-                self._tensorboard.add_train_scalar("loss/loss_train", metrics["loss"])
-                self._tensorboard.log_metrics({"epoch_metrics/" + k: v for k, v in metrics.items()})
-
-            if self._tensorboard.should_log_histograms_this_batch() and self._master:
-                self._tensorboard.log_histograms(self.model, histogram_parameters)
-
-            if self._log_batch_size_period:
-                batch_group_size = sum(training_util.get_batch_size(batch) for batch in batch_group)
-                cumulative_batch_group_size += batch_group_size
-                if (batches_this_epoch - 1) % self._log_batch_size_period == 0:
-                    average = cumulative_batch_group_size / batches_this_epoch
-                    logger.info(
-                        f"current batch size: {batch_group_size} mean batch size: {average}"
-                    )
-                    self._tensorboard.add_train_scalar("current_batch_size", batch_group_size)
-                    self._tensorboard.add_train_scalar("mean_batch_size", average)
-
-            # Save model if needed.
-            if (
-                self._model_save_interval is not None
-                and (time.time() - last_save_time > self._model_save_interval)
-                and self._master
-            ):
-                last_save_time = time.time()
-                self._save_checkpoint(
-                    "{0}.{1}".format(epoch, training_util.time_to_str(int(last_save_time)))
-                )
-        metrics = training_util.get_metrics(
-            self.model,
-            train_loss,
-            batches_this_epoch,
-            reset=True,
-            world_size=self._world_size,
-            cuda_device=[self.cuda_device],
-        )
-        metrics["cpu_memory_MB"] = peak_cpu_usage
-        for (gpu_num, memory) in gpu_usage:
-            metrics["gpu_" + str(gpu_num) + "_memory_MB"] = memory
-        ### adversarila stuff
-        #         metrics.update(adv_results)
-
-        return metrics
+            
+        return adv_results, adv_data    
 
     def _validation_loss(self) -> Tuple[float, int]:
         """
@@ -741,6 +611,7 @@ class AdversarialTrainer(TrainerBase):
 
         train_metrics: Dict[str, float] = {}
         val_metrics: Dict[str, float] = {}
+        adv_metrics: Dict[str, float] = {}
         this_epoch_val_metric: float = None
         metrics: Dict[str, Any] = {}
         epochs_trained = 0
@@ -754,7 +625,11 @@ class AdversarialTrainer(TrainerBase):
             epoch_start_time = time.time()
             train_metrics = self._train_epoch(epoch)
             # if .. train else attack
-
+            adv_out, self.adv_data = self._attack_epoch(epoch)
+            adv_metrics.update(adv_out)
+            self.train_data = self.adv_data
+                      
+            
             # get peak of memory usage
             if "cpu_memory_MB" in train_metrics:
                 metrics["peak_cpu_memory_MB"] = max(
@@ -767,7 +642,7 @@ class AdversarialTrainer(TrainerBase):
             # Let all workers finish training before going into the validation mode
             if self._distributed:
                 dist.barrier()
-
+            
             if self._validation_data is not None:
                 with torch.no_grad():
                     # We have a validation set, so compute all the metrics on it.
@@ -790,8 +665,9 @@ class AdversarialTrainer(TrainerBase):
                     # Check validation metric for early stopping
                     this_epoch_val_metric = val_metrics[self._validation_metric]
                     self._metric_tracker.add_metric(this_epoch_val_metric)
-
+                   
                     if self._metric_tracker.should_stop_early():
+                        breakpoint()
                         logger.info("Ran out of patience.  Stopping training.")
                         break
 
@@ -811,6 +687,9 @@ class AdversarialTrainer(TrainerBase):
                 metrics["training_" + key] = value
             for key, value in val_metrics.items():
                 metrics["validation_" + key] = value
+            for key, value in adv_metrics.items():
+                metrics["adversarial_" + key] = value
+    
 
             if self._metric_tracker.is_best_so_far():
                 # Update all the best_ metrics.
@@ -969,6 +848,7 @@ class AdversarialTrainer(TrainerBase):
         model: Model,
         serialization_dir: str,
         iterator: DataIterator,
+        dataset_reader : DatasetReader,
         train_data: Iterable[Instance],
         validation_data: Optional[Iterable[Instance]],
         params: Params,
@@ -985,6 +865,8 @@ class AdversarialTrainer(TrainerBase):
         grad_clipping = params.pop_float("grad_clipping", None)
         lr_scheduler_params = params.pop("learning_rate_scheduler", None)
         momentum_scheduler_params = params.pop("momentum_scheduler", None)
+        
+        ###READER to edit to make it more customizable
 
         check_for_gpu(cuda_device)
         if cuda_device >= 0:
@@ -1040,9 +922,8 @@ class AdversarialTrainer(TrainerBase):
 
         distributed = params.pop_bool("distributed", False)
         world_size = params.pop_int("world_size", 1)
-
+        
         attacker = params.pop("attacker", None)
-        reader = params.pop("reader", None)
 
         num_gradient_accumulation_steps = params.pop("num_gradient_accumulation_steps", 1)
 
@@ -1051,6 +932,7 @@ class AdversarialTrainer(TrainerBase):
             model,
             optimizer,
             iterator,
+            dataset_reader,
             train_data,
             validation_data,
             patience=patience,
@@ -1077,5 +959,4 @@ class AdversarialTrainer(TrainerBase):
             world_size=world_size,
             num_gradient_accumulation_steps=num_gradient_accumulation_steps,
             attacker=attacker,
-            reader=reader,
         )
