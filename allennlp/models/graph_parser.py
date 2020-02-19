@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple, Any, List
+from typing import Dict, Tuple, Any, List
 import logging
 import copy
 
@@ -8,12 +8,12 @@ from torch.nn.modules import Dropout
 import numpy
 
 from allennlp.common.checks import check_dimensions_match, ConfigurationError
-from allennlp.data import Vocabulary
+from allennlp.data import TextFieldTensors, Vocabulary
 from allennlp.modules import Seq2SeqEncoder, TextFieldEmbedder, Embedding, InputVariationalDropout
 from allennlp.modules.matrix_attention.bilinear_matrix_attention import BilinearMatrixAttention
 from allennlp.modules import FeedForward
 from allennlp.models.model import Model
-from allennlp.nn import InitializerApplicator, RegularizerApplicator, Activation
+from allennlp.nn import InitializerApplicator, Activation
 from allennlp.nn.util import get_text_field_mask
 from allennlp.nn.util import get_lengths_from_binary_sequence_mask
 from allennlp.training.metrics import F1Measure
@@ -28,36 +28,34 @@ class GraphParser(Model):
 
     # Parameters
 
-    vocab : ``Vocabulary``, required
+    vocab : `Vocabulary`, required
         A Vocabulary, required in order to compute sizes for input/output projections.
-    text_field_embedder : ``TextFieldEmbedder``, required
-        Used to embed the ``tokens`` ``TextField`` we get as input to the model.
-    encoder : ``Seq2SeqEncoder``
+    text_field_embedder : `TextFieldEmbedder`, required
+        Used to embed the `tokens` `TextField` we get as input to the model.
+    encoder : `Seq2SeqEncoder`
         The encoder (with its own internal stacking) that we will use to generate representations
         of tokens.
-    tag_representation_dim : ``int``, required.
+    tag_representation_dim : `int`, required.
         The dimension of the MLPs used for arc tag prediction.
-    arc_representation_dim : ``int``, required.
+    arc_representation_dim : `int`, required.
         The dimension of the MLPs used for arc prediction.
-    tag_feedforward : ``FeedForward``, optional, (default = None).
+    tag_feedforward : `FeedForward`, optional, (default = None).
         The feedforward network used to produce tag representations.
         By default, a 1 layer feedforward network with an elu activation is used.
-    arc_feedforward : ``FeedForward``, optional, (default = None).
+    arc_feedforward : `FeedForward`, optional, (default = None).
         The feedforward network used to produce arc representations.
         By default, a 1 layer feedforward network with an elu activation is used.
-    pos_tag_embedding : ``Embedding``, optional.
-        Used to embed the ``pos_tags`` ``SequenceLabelField`` we get as input to the model.
-    dropout : ``float``, optional, (default = 0.0)
+    pos_tag_embedding : `Embedding`, optional.
+        Used to embed the `pos_tags` `SequenceLabelField` we get as input to the model.
+    dropout : `float`, optional, (default = 0.0)
         The variational dropout applied to the output of the encoder and MLP layers.
-    input_dropout : ``float``, optional, (default = 0.0)
+    input_dropout : `float`, optional, (default = 0.0)
         The dropout applied to the embedded text input.
-    edge_prediction_threshold : ``int``, optional (default = 0.5)
+    edge_prediction_threshold : `int`, optional (default = 0.5)
         The probability at which to consider a scored edge to be 'present'
         in the decoded graph. Must be between 0 and 1.
-    initializer : ``InitializerApplicator``, optional (default=``InitializerApplicator()``)
+    initializer : `InitializerApplicator`, optional (default=`InitializerApplicator()`)
         Used to initialize the model parameters.
-    regularizer : ``RegularizerApplicator``, optional (default=``None``)
-        If provided, will be used to calculate the regularization penalty during training.
     """
 
     def __init__(
@@ -74,9 +72,9 @@ class GraphParser(Model):
         input_dropout: float = 0.0,
         edge_prediction_threshold: float = 0.5,
         initializer: InitializerApplicator = InitializerApplicator(),
-        regularizer: Optional[RegularizerApplicator] = None,
+        **kwargs,
     ) -> None:
-        super().__init__(vocab, regularizer)
+        super().__init__(vocab, **kwargs)
 
         self.text_field_embedder = text_field_embedder
         self.encoder = encoder
@@ -143,7 +141,7 @@ class GraphParser(Model):
     @overrides
     def forward(
         self,  # type: ignore
-        tokens: Dict[str, torch.LongTensor],
+        tokens: TextFieldTensors,
         pos_tags: torch.LongTensor = None,
         metadata: List[Dict[str, Any]] = None,
         arc_tags: torch.LongTensor = None,
@@ -152,17 +150,17 @@ class GraphParser(Model):
         """
         # Parameters
 
-        tokens : Dict[str, torch.LongTensor], required
-            The output of ``TextField.as_array()``.
+        tokens : TextFieldTensors, required
+            The output of `TextField.as_array()`.
         pos_tags : torch.LongTensor, optional (default = None)
-            The output of a ``SequenceLabelField`` containing POS tags.
+            The output of a `SequenceLabelField` containing POS tags.
         metadata : List[Dict[str, Any]], optional (default = None)
             A dictionary of metadata for each batch element which has keys:
-                tokens : ``List[str]``, required.
+                tokens : `List[str]`, required.
                     The original string tokens in the sentence.
         arc_tags : torch.LongTensor, optional (default = None)
             A torch tensor representing the sequence of integer indices denoting the parent of every
-            word in the dependency parse. Has shape ``(batch_size, sequence_length, sequence_length)``.
+            word in the dependency parse. Has shape `(batch_size, sequence_length, sequence_length)`.
 
         # Returns
 
@@ -268,24 +266,24 @@ class GraphParser(Model):
 
         # Parameters
 
-        arc_scores : ``torch.Tensor``, required.
+        arc_scores : `torch.Tensor`, required.
             A tensor of shape (batch_size, sequence_length, sequence_length) used to generate a
             binary classification decision for whether an edge is present between two words.
-        arc_tag_logits : ``torch.Tensor``, required.
+        arc_tag_logits : `torch.Tensor`, required.
             A tensor of shape (batch_size, sequence_length, sequence_length, num_tags) used to generate
             a distribution over edge tags for a given edge.
-        arc_tags : ``torch.Tensor``, required.
+        arc_tags : `torch.Tensor`, required.
             A tensor of shape (batch_size, sequence_length, sequence_length).
             The labels for every arc.
-        mask : ``torch.Tensor``, required.
+        mask : `torch.Tensor`, required.
             A mask of shape (batch_size, sequence_length), denoting unpadded
             elements in the sequence.
 
         # Returns
 
-        arc_nll : ``torch.Tensor``, required.
+        arc_nll : `torch.Tensor`, required.
             The negative log likelihood from the arc loss.
-        tag_nll : ``torch.Tensor``, required.
+        tag_nll : `torch.Tensor`, required.
             The negative log likelihood from the arc tag loss.
         """
         float_mask = mask.float()
@@ -327,21 +325,21 @@ class GraphParser(Model):
 
         # Parameters
 
-        arc_scores : ``torch.Tensor``, required.
+        arc_scores : `torch.Tensor`, required.
             A tensor of shape (batch_size, sequence_length, sequence_length) used to generate
             a distribution over attachments of a given word to all other words.
-        arc_tag_logits : ``torch.Tensor``, required.
+        arc_tag_logits : `torch.Tensor`, required.
             A tensor of shape (batch_size, sequence_length, sequence_length, num_tags) used to
             generate a distribution over tags for each arc.
-        mask : ``torch.Tensor``, required.
+        mask : `torch.Tensor`, required.
             A mask of shape (batch_size, sequence_length).
 
         # Returns
 
-        arc_probs : ``torch.Tensor``
+        arc_probs : `torch.Tensor`
             A tensor of shape (batch_size, sequence_length, sequence_length) representing the
             probability of an arc being present for this edge.
-        arc_tag_probs : ``torch.Tensor``
+        arc_tag_probs : `torch.Tensor`
             A tensor of shape (batch_size, sequence_length, sequence_length, sequence_length)
             representing the distribution over edge tags for a given edge.
         """

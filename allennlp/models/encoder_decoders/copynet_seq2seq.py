@@ -8,7 +8,7 @@ from torch.nn.modules.linear import Linear
 from torch.nn.modules.rnn import LSTMCell
 
 from allennlp.common.util import START_SYMBOL, END_SYMBOL
-from allennlp.data.vocabulary import Vocabulary
+from allennlp.data import TextFieldTensors, Vocabulary
 from allennlp.models.model import Model
 from allennlp.modules import Attention, TextFieldEmbedder, Seq2SeqEncoder
 from allennlp.modules.token_embedders import Embedding
@@ -38,38 +38,38 @@ class CopyNetSeq2Seq(Model):
 
     # Parameters
 
-    vocab : ``Vocabulary``, required
+    vocab : `Vocabulary`, required
         Vocabulary containing source and target vocabularies.
-    source_embedder : ``TextFieldEmbedder``, required
+    source_embedder : `TextFieldEmbedder`, required
         Embedder for source side sequences
-    encoder : ``Seq2SeqEncoder``, required
+    encoder : `Seq2SeqEncoder`, required
         The encoder of the "encoder/decoder" model
-    attention : ``Attention``, required
+    attention : `Attention`, required
         This is used to get a dynamic summary of encoder outputs at each timestep
         when producing the "generation" scores for the target vocab.
-    beam_size : ``int``, required
+    beam_size : `int`, required
         Beam width to use for beam search prediction.
-    max_decoding_steps : ``int``, required
+    max_decoding_steps : `int`, required
         Maximum sequence length of target predictions.
-    target_embedding_dim : ``int``, optional (default = 30)
+    target_embedding_dim : `int`, optional (default = 30)
         The size of the embeddings for the target vocabulary.
-    copy_token : ``str``, optional (default = '@COPY@')
+    copy_token : `str`, optional (default = '@COPY@')
         The token used to indicate that a target token was copied from the source.
         If this token is not already in your target vocabulary, it will be added.
-    source_namespace : ``str``, optional (default = 'source_tokens')
+    source_namespace : `str`, optional (default = 'source_tokens')
         The namespace for the source vocabulary.
-    target_namespace : ``str``, optional (default = 'target_tokens')
+    target_namespace : `str`, optional (default = 'target_tokens')
         The namespace for the target vocabulary.
-    tensor_based_metric : ``Metric``, optional (default = BLEU)
+    tensor_based_metric : `Metric`, optional (default = BLEU)
         A metric to track on validation data that takes raw tensors when its called.
         This metric must accept two arguments when called: a batched tensor
         of predicted token indices, and a batched tensor of gold token indices.
-    token_based_metric : ``Metric``, optional (default = None)
+    token_based_metric : `Metric`, optional (default = None)
         A metric to track on validation data that takes lists of lists of tokens
         as input. This metric must accept two arguments when called, both
         of type `List[List[str]]`. The first is a predicted sequence for each item
         in the batch and the second is a gold sequence for each item in the batch.
-    initializer : ``InitializerApplicator``, optional
+    initializer : `InitializerApplicator`, optional
         An initialization strategy for the model weights.
     """
 
@@ -158,11 +158,11 @@ class CopyNetSeq2Seq(Model):
     @overrides
     def forward(
         self,  # type: ignore
-        source_tokens: Dict[str, torch.LongTensor],
+        source_tokens: TextFieldTensors,
         source_token_ids: torch.Tensor,
         source_to_target: torch.Tensor,
         metadata: List[Dict[str, Any]],
-        target_tokens: Dict[str, torch.LongTensor] = None,
+        target_tokens: TextFieldTensors = None,
         target_token_ids: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
 
@@ -171,24 +171,24 @@ class CopyNetSeq2Seq(Model):
 
         # Parameters
 
-        source_tokens : ``Dict[str, torch.LongTensor]``, required
+        source_tokens : `TextFieldTensors`, required
             The output of `TextField.as_array()` applied on the source `TextField`. This will be
             passed through a `TextFieldEmbedder` and then through an encoder.
-        source_token_ids : ``torch.Tensor``, required
+        source_token_ids : `torch.Tensor`, required
             Tensor containing IDs that indicate which source tokens match each other.
             Has shape: `(batch_size, trimmed_source_length)`.
-        source_to_target : ``torch.Tensor``, required
+        source_to_target : `torch.Tensor`, required
             Tensor containing vocab index of each source token with respect to the
             target vocab namespace. Shape: `(batch_size, trimmed_source_length)`.
-        metadata : ``List[Dict[str, Any]]``, required
+        metadata : `List[Dict[str, Any]]`, required
             Metadata field that contains the original source tokens with key 'source_tokens'
             and any other meta fields. When 'target_tokens' is also passed, the metadata
             should also contain the original target tokens with key 'target_tokens'.
-        target_tokens : ``Dict[str, torch.LongTensor]``, optional (default = None)
+        target_tokens : `TextFieldTensors`, optional (default = None)
             Output of `Textfield.as_array()` applied on target `TextField`. We assume that the
             target tokens are also represented as a `TextField` which must contain a "tokens"
             key that uses single ids.
-        target_token_ids : ``torch.Tensor``, optional (default = None)
+        target_token_ids : `torch.Tensor`, optional (default = None)
             A tensor of shape `(batch_size, target_sequence_length)` which indicates which
             tokens in the target sequence match tokens in the source sequence.
 
@@ -220,7 +220,7 @@ class CopyNetSeq2Seq(Model):
                     best_predictions = top_k_predictions[:, 0, :]
                     # shape: (batch_size, target_sequence_length)
                     gold_tokens = self._gather_extended_gold_tokens(
-                        target_tokens["tokens"], source_token_ids, target_token_ids
+                        target_tokens["tokens"]["tokens"], source_token_ids, target_token_ids
                     )
                     self._tensor_based_metric(best_predictions, gold_tokens)  # type: ignore
                 if self._token_based_metric is not None:
@@ -248,11 +248,11 @@ class CopyNetSeq2Seq(Model):
 
         # Parameters
 
-        target_tokens : ``torch.Tensor``
+        target_tokens : `torch.Tensor`
             Shape: `(batch_size, target_sequence_length)`.
-        source_token_ids : ``torch.Tensor``
+        source_token_ids : `torch.Tensor`
             Shape: `(batch_size, trimmed_source_length)`.
-        target_token_ids : ``torch.Tensor``
+        target_token_ids : `torch.Tensor`
             Shape: `(batch_size, target_sequence_length)`.
 
         # Returns
@@ -377,17 +377,17 @@ class CopyNetSeq2Seq(Model):
 
         # Parameters
 
-        generation_scores : ``torch.Tensor``
+        generation_scores : `torch.Tensor`
             Shape: `(batch_size, target_vocab_size)`
-        generation_scores_mask : ``torch.Tensor``
+        generation_scores_mask : `torch.Tensor`
             Shape: `(batch_size, target_vocab_size)`. This is just a tensor of 1's.
-        copy_scores : ``torch.Tensor``
+        copy_scores : `torch.Tensor`
             Shape: `(batch_size, trimmed_source_length)`
-        target_tokens : ``torch.Tensor``
+        target_tokens : `torch.Tensor`
             Shape: `(batch_size,)`
-        target_to_source : ``torch.Tensor``
+        target_to_source : `torch.Tensor`
             Shape: `(batch_size, trimmed_source_length)`
-        copy_mask : ``torch.Tensor``
+        copy_mask : `torch.Tensor`
             Shape: `(batch_size, trimmed_source_length)`
 
         # Returns
@@ -438,14 +438,14 @@ class CopyNetSeq2Seq(Model):
 
     def _forward_loss(
         self,
-        target_tokens: Dict[str, torch.LongTensor],
+        target_tokens: TextFieldTensors,
         target_token_ids: torch.Tensor,
         state: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         """
         Calculate the loss against gold targets.
         """
-        batch_size, target_sequence_length = target_tokens["tokens"].size()
+        batch_size, target_sequence_length = target_tokens["tokens"]["tokens"].size()
 
         # shape: (batch_size, max_input_sequence_length)
         source_mask = state["source_mask"]
@@ -477,7 +477,7 @@ class CopyNetSeq2Seq(Model):
         step_log_likelihoods = []
         for timestep in range(num_decoding_steps):
             # shape: (batch_size,)
-            input_choices = target_tokens["tokens"][:, timestep]
+            input_choices = target_tokens["tokens"]["tokens"][:, timestep]
             # If the previous target token was copied, we use the special copy token.
             # But the end target token will always be THE end token, so we know
             # it was not copied.
@@ -503,7 +503,7 @@ class CopyNetSeq2Seq(Model):
             # shape: (batch_size, trimmed_source_length)
             copy_scores = self._get_copy_scores(state)
             # shape: (batch_size,)
-            step_target_tokens = target_tokens["tokens"][:, timestep + 1]
+            step_target_tokens = target_tokens["tokens"]["tokens"][:, timestep + 1]
             step_log_likelihood, selective_weights = self._get_ll_contrib(
                 generation_scores,
                 generation_scores_mask,
@@ -566,9 +566,9 @@ class CopyNetSeq2Seq(Model):
 
         # Parameters
 
-        last_predictions : ``torch.LongTensor``
+        last_predictions : `torch.LongTensor`
             Shape: `(group_size,)`
-        state : ``Dict[str, torch.Tensor]``
+        state : `Dict[str, torch.Tensor]`
 
         # Returns
 
@@ -648,11 +648,11 @@ class CopyNetSeq2Seq(Model):
 
         # Parameters
 
-        generation_log_probs : ``torch.Tensor``
+        generation_log_probs : `torch.Tensor`
             Shape: `(group_size, target_vocab_size)`
-        copy_log_probs : ``torch.Tensor``
+        copy_log_probs : `torch.Tensor`
             Shape: `(group_size, trimmed_source_length)`
-        state : ``Dict[str, torch.Tensor]``
+        state : `Dict[str, torch.Tensor]`
 
         # Returns
 
@@ -774,10 +774,10 @@ class CopyNetSeq2Seq(Model):
 
         # Parameters
 
-        last_predictions : ``torch.Tensor``
+        last_predictions : `torch.Tensor`
             Shape: `(group_size,)`
 
-        state : ``Dict[str, torch.Tensor]``
+        state : `Dict[str, torch.Tensor]`
             Contains all state tensors necessary to produce generation and copy scores
             for next step.
 

@@ -10,7 +10,7 @@ class PassThroughTokenEmbedder(TokenEmbedder):
 
     # Parameters
 
-    hidden_dim : ``int``, required.
+    hidden_dim : `int`, required.
 
     """
 
@@ -21,5 +21,5 @@ class PassThroughTokenEmbedder(TokenEmbedder):
     def get_output_dim(self):
         return self.hidden_dim
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return inputs
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return tokens

@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Any, List
+from typing import Dict, Any, List
 import logging
 
 from collections import defaultdict
@@ -7,12 +7,12 @@ import torch
 import numpy
 
 from allennlp.common.checks import ConfigurationError
-from allennlp.data import Vocabulary
+from allennlp.data import TextFieldTensors, Vocabulary
 from allennlp.modules import Seq2SeqEncoder, TextFieldEmbedder, Embedding
 from allennlp.modules import FeedForward
 from allennlp.models.model import Model
 from allennlp.models.biaffine_dependency_parser import BiaffineDependencyParser
-from allennlp.nn import InitializerApplicator, RegularizerApplicator
+from allennlp.nn import InitializerApplicator
 from allennlp.nn.util import get_text_field_mask
 from allennlp.training.metrics import AttachmentScores
 
@@ -40,39 +40,37 @@ class BiaffineDependencyParserMultiLang(BiaffineDependencyParser):
 
     # Parameters
 
-    vocab : ``Vocabulary``, required
+    vocab : `Vocabulary`, required
         A Vocabulary, required in order to compute sizes for input/output projections.
-    text_field_embedder : ``TextFieldEmbedder``, required
-        Used to embed the ``tokens`` ``TextField`` we get as input to the model.
-    encoder : ``Seq2SeqEncoder``
+    text_field_embedder : `TextFieldEmbedder`, required
+        Used to embed the `tokens` `TextField` we get as input to the model.
+    encoder : `Seq2SeqEncoder`
         The encoder (with its own internal stacking) that we will use to generate representations
         of tokens.
-    tag_representation_dim : ``int``, required.
+    tag_representation_dim : `int`, required.
         The dimension of the MLPs used for dependency tag prediction.
-    arc_representation_dim : ``int``, required.
+    arc_representation_dim : `int`, required.
         The dimension of the MLPs used for head arc prediction.
-    tag_feedforward : ``FeedForward``, optional, (default = None).
+    tag_feedforward : `FeedForward`, optional, (default = None).
         The feedforward network used to produce tag representations.
         By default, a 1 layer feedforward network with an elu activation is used.
-    arc_feedforward : ``FeedForward``, optional, (default = None).
+    arc_feedforward : `FeedForward`, optional, (default = None).
         The feedforward network used to produce arc representations.
         By default, a 1 layer feedforward network with an elu activation is used.
-    pos_tag_embedding : ``Embedding``, optional.
-        Used to embed the ``pos_tags`` ``SequenceLabelField`` we get as input to the model.
-    use_mst_decoding_for_validation : ``bool``, optional (default = True).
+    pos_tag_embedding : `Embedding`, optional.
+        Used to embed the `pos_tags` `SequenceLabelField` we get as input to the model.
+    use_mst_decoding_for_validation : `bool`, optional (default = True).
         Whether to use Edmond's algorithm to find the optimal minimum spanning tree during validation.
         If false, decoding is greedy.
-    langs_for_early_stop : ``List[str]``, optional, (default = [])
+    langs_for_early_stop : `List[str]`, optional, (default = [])
         Which languages to include in the averaged metrics
         (that could be used for early stopping).
-    dropout : ``float``, optional, (default = 0.0)
+    dropout : `float`, optional, (default = 0.0)
         The variational dropout applied to the output of the encoder and MLP layers.
-    input_dropout : ``float``, optional, (default = 0.0)
+    input_dropout : `float`, optional, (default = 0.0)
         The dropout applied to the embedded text input.
-    initializer : ``InitializerApplicator``, optional (default=``InitializerApplicator()``)
+    initializer : `InitializerApplicator`, optional (default=`InitializerApplicator()`)
         Used to initialize the model parameters.
-    regularizer : ``RegularizerApplicator``, optional (default=``None``)
-        If provided, will be used to calculate the regularization penalty during training.
     """
 
     def __init__(
@@ -90,7 +88,7 @@ class BiaffineDependencyParserMultiLang(BiaffineDependencyParser):
         dropout: float = 0.0,
         input_dropout: float = 0.0,
         initializer: InitializerApplicator = InitializerApplicator(),
-        regularizer: Optional[RegularizerApplicator] = None,
+        **kwargs,
     ) -> None:
         super().__init__(
             vocab,
@@ -105,7 +103,7 @@ class BiaffineDependencyParserMultiLang(BiaffineDependencyParser):
             dropout,
             input_dropout,
             initializer,
-            regularizer,
+            **kwargs,
         )
 
         self._langs_for_early_stop = langs_for_early_stop or []
@@ -115,7 +113,7 @@ class BiaffineDependencyParserMultiLang(BiaffineDependencyParser):
     @overrides
     def forward(
         self,  # type: ignore
-        words: Dict[str, torch.LongTensor],
+        words: TextFieldTensors,
         pos_tags: torch.LongTensor,
         metadata: List[Dict[str, Any]],
         head_tags: torch.LongTensor = None,
@@ -124,9 +122,9 @@ class BiaffineDependencyParserMultiLang(BiaffineDependencyParser):
 
         """
         Embedding each language by the corresponding parameters for
-        ``TextFieldEmbedder``. Batches should contain only samples from a
+        `TextFieldEmbedder`. Batches should contain only samples from a
         single language.
-        Metadata should have a ``lang`` key.
+        Metadata should have a `lang` key.
         """
         if "lang" not in metadata[0]:
             raise ConfigurationError(

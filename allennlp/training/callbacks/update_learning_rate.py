@@ -18,7 +18,7 @@ class UpdateLearningRate(Callback):
 
     # Parameters
 
-    learning_rate_scheduler : ``LearningRateScheduler``
+    learning_rate_scheduler : `LearningRateScheduler`
         The scheduler to handler.
     """
 
@@ -47,7 +47,7 @@ class UpdateLearningRate(Callback):
 
     @classmethod
     def from_params(  # type: ignore
-        cls, params: Params, optimizer: torch.optim.Optimizer
+        cls, params: Params, optimizer: torch.optim.Optimizer, **extras
     ) -> "UpdateLearningRate":
 
         return cls(

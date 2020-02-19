@@ -13,8 +13,9 @@ for developing state-of-the-art deep learning models on a wide variety of lingui
 * [Forum](https://discourse.allennlp.org)
 * [Documentation](https://allenai.github.io/allennlp-docs/)
 * [Contributing Guidelines](CONTRIBUTING.md)
-* [Model List](MODELS.md)
+* [Pretrained Models](https://github.com/allenai/allennlp-hub/blob/master/allennlp_hub/pretrained/allennlp_pretrained.py)
 * [Continuous Build](http://build.allennlp.org/)
+* [Nightly Releases](https://pypi.org/project/allennlp/#history)
 
 ## Package Overview
 
@@ -86,7 +87,7 @@ Installing the library and dependencies is simple using `pip`.
    ```bash
    pip install allennlp
    ```
-
+*Looking for bleeding edge features? You can install nightly releases directly from [pypi](https://pypi.org/project/allennlp/#history)*
 That's it! You're now ready to build and train AllenNLP models.
 AllenNLP installs a script when you install the python package, meaning you can run allennlp commands just by typing `allennlp` into a terminal.
 
@@ -140,23 +141,21 @@ $ allennlp
 Run AllenNLP
 
 optional arguments:
-  -h, --help    show this help message and exit
-  --version     show program's version number and exit
+  -h, --help     show this help message and exit
+  --version      show program's version number and exit
 
 Commands:
-
-    configure   Run the configuration wizard.
-    train       Train a model.
-    evaluate    Evaluate the specified model + dataset.
-    predict     Use a trained model to make predictions.
-    make-vocab  Create a vocabulary.
-    elmo        Create word vectors using a pretrained ELMo model.
-    fine-tune   Continue training a model on a new dataset.
-    dry-run     Create a vocabulary, compute dataset statistics and other
-                training utilities.
+  
+    elmo         Create word vectors using a pretrained ELMo model.
+    evaluate     Evaluate the specified model + dataset.
+    find-lr      Find a learning rate range.
+    predict      Use a trained model to make predictions.
+    print-results
+                 Print results from allennlp serialization directories to the
+                 console.
     test-install
-                Run the unit tests.
-    find-lr     Find a learning rate range.
+                 Run the unit tests.
+    train        Train a model.
 ```
 
 ## Docker images

@@ -1,29 +1,27 @@
 import copy
 import glob
 import json
-import math
 import os
 import re
 import time
-from typing import Dict
 
-import torch
+import math
 import pytest
-from allennlp.common.checks import ConfigurationError
+import torch
 
-from allennlp.common.testing import AllenNlpTestCase, ModelTestCase
-from allennlp.training import Trainer
-from allennlp.training.trainer_base import TrainerBase
-from allennlp.training.learning_rate_schedulers import LearningRateScheduler
-from allennlp.training.momentum_schedulers import MomentumScheduler
-from allennlp.training.util import sparse_clip_norm
-from allennlp.data import Vocabulary
+from allennlp.common.checks import ConfigurationError
 from allennlp.common.params import Params
-from allennlp.models.simple_tagger import SimpleTagger
-from allennlp.data.iterators import BasicIterator
+from allennlp.common.testing import AllenNlpTestCase, ModelTestCase
+from allennlp.data import Vocabulary
 from allennlp.data.dataset_readers import SequenceTaggingDatasetReader
+from allennlp.data.iterators import BasicIterator
 from allennlp.models.model import Model
+from allennlp.models.simple_tagger import SimpleTagger
+from allennlp.training import Trainer
+from allennlp.training.learning_rate_schedulers import ExponentialLearningRateScheduler
+from allennlp.training.momentum_schedulers import MomentumScheduler
 from allennlp.training.moving_average import ExponentialMovingAverage
+from allennlp.training.util import sparse_clip_norm
 
 
 class TestTrainer(AllenNlpTestCase):
@@ -399,7 +397,8 @@ class TestTrainer(AllenNlpTestCase):
 
     def test_trainer_can_run_and_resume_with_momentum_scheduler(self):
         scheduler = MomentumScheduler.from_params(
-            self.optimizer, Params({"type": "inverted_triangular", "cool_down": 2, "warm_up": 2})
+            optimizer=self.optimizer,
+            params=Params({"type": "inverted_triangular", "cool_down": 2, "warm_up": 2}),
         )
         trainer = Trainer(
             model=self.model,
@@ -415,7 +414,8 @@ class TestTrainer(AllenNlpTestCase):
         trainer.train()
 
         new_scheduler = MomentumScheduler.from_params(
-            self.optimizer, Params({"type": "inverted_triangular", "cool_down": 2, "warm_up": 2})
+            optimizer=self.optimizer,
+            params=Params({"type": "inverted_triangular", "cool_down": 2, "warm_up": 2}),
         )
         new_trainer = Trainer(
             model=self.model,
@@ -434,8 +434,7 @@ class TestTrainer(AllenNlpTestCase):
         new_trainer.train()
 
     def test_trainer_can_run_with_lr_scheduler(self):
-        lr_params = Params({"type": "reduce_on_plateau"})
-        lr_scheduler = LearningRateScheduler.from_params(self.optimizer, lr_params)
+        lr_scheduler = ExponentialLearningRateScheduler(self.optimizer, gamma=0.5)
         trainer = Trainer(
             model=self.model,
             optimizer=self.optimizer,
@@ -449,9 +448,7 @@ class TestTrainer(AllenNlpTestCase):
         trainer.train()
 
     def test_trainer_can_resume_with_lr_scheduler(self):
-        lr_scheduler = LearningRateScheduler.from_params(
-            self.optimizer, Params({"type": "exponential", "gamma": 0.5})
-        )
+        lr_scheduler = ExponentialLearningRateScheduler(self.optimizer, gamma=0.5)
         trainer = Trainer(
             model=self.model,
             optimizer=self.optimizer,
@@ -464,9 +461,7 @@ class TestTrainer(AllenNlpTestCase):
         )
         trainer.train()
 
-        new_lr_scheduler = LearningRateScheduler.from_params(
-            self.optimizer, Params({"type": "exponential", "gamma": 0.5})
-        )
+        new_lr_scheduler = ExponentialLearningRateScheduler(self.optimizer, gamma=0.5)
         new_trainer = Trainer(
             model=self.model,
             optimizer=self.optimizer,
@@ -651,12 +646,6 @@ class TestTrainer(AllenNlpTestCase):
         assert epoch == 2
         # One batch per epoch.
         assert restore_trainer._batch_num_total == 2
-
-    def test_trainer_from_base_class_params(self):
-        params = Params.from_file(self.FIXTURES_ROOT / "simple_tagger" / "experiment.json")
-
-        # Can instantiate from base class params
-        TrainerBase.from_params(params, self.TEST_DIR)
 
     def test_trainer_saves_and_loads_best_validation_metrics_correctly_1(self):
         # Use -loss and run 1 epoch of original-training, and one of restored-training

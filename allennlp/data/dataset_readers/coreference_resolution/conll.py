@@ -15,7 +15,7 @@ from allennlp.data.fields import (
     SequenceLabelField,
 )
 from allennlp.data.instance import Instance
-from allennlp.data.tokenizers import Token
+from allennlp.data.tokenizers import Token, PretrainedTransformerTokenizer
 from allennlp.data.token_indexers import SingleIdTokenIndexer, TokenIndexer
 from allennlp.data.dataset_readers.dataset_utils import Ontonotes, enumerate_spans
 
@@ -65,31 +65,39 @@ class ConllCorefReader(DatasetReader):
     scripts/compile_coref_data.sh for more details of how to pre-process the Ontonotes 5.0 data
     into the correct format.
 
-    Returns a ``Dataset`` where the ``Instances`` have four fields : ``text``, a ``TextField``
-    containing the full document text, ``spans``, a ``ListField[SpanField]`` of inclusive start and
-    end indices for span candidates, and ``metadata``, a ``MetadataField`` that stores the instance's
-    original text. For data with gold cluster labels, we also include the original ``clusters``
-    (a list of list of index pairs) and a ``SequenceLabelField`` of cluster ids for every span
+    Returns a `Dataset` where the `Instances` have four fields : `text`, a `TextField`
+    containing the full document text, `spans`, a `ListField[SpanField]` of inclusive start and
+    end indices for span candidates, and `metadata`, a `MetadataField` that stores the instance's
+    original text. For data with gold cluster labels, we also include the original `clusters`
+    (a list of list of index pairs) and a `SequenceLabelField` of cluster ids for every span
     candidate.
 
     # Parameters
 
-    max_span_width : ``int``, required.
+    max_span_width : `int`, required.
         The maximum width of candidate spans to consider.
-    token_indexers : ``Dict[str, TokenIndexer]``, optional
+    token_indexers : `Dict[str, TokenIndexer]`, optional
         This is used to index the words in the document.  See :class:`TokenIndexer`.
-        Default is ``{"tokens": SingleIdTokenIndexer()}``.
+        Default is `{"tokens": SingleIdTokenIndexer()}`.
+    wordpiece_modeling_tokenizer: `PretrainedTransformerTokenizer`, optional (default = None)
+        If not None, this dataset reader does subword tokenization using the supplied tokenizer
+        and distribute the labels to the resulting wordpieces. All the modeling will be based on
+        wordpieces. If this is set to `False` (default), the user is expected to use
+        `PretrainedTransformerMismatchedIndexer` and `PretrainedTransformerMismatchedEmbedder`,
+        and the modeling will be on the word-level.
     """
 
     def __init__(
         self,
         max_span_width: int,
         token_indexers: Dict[str, TokenIndexer] = None,
-        lazy: bool = False,
+        wordpiece_modeling_tokenizer: Optional[PretrainedTransformerTokenizer] = None,
+        **kwargs,
     ) -> None:
-        super().__init__(lazy)
+        super().__init__(**kwargs)
         self._max_span_width = max_span_width
         self._token_indexers = token_indexers or {"tokens": SingleIdTokenIndexer()}
+        self._wordpiece_modeling_tokenizer = wordpiece_modeling_tokenizer
 
     @overrides
     def _read(self, file_path: str):
@@ -123,39 +131,50 @@ class ConllCorefReader(DatasetReader):
         """
         # Parameters
 
-        sentences : ``List[List[str]]``, required.
+        sentences : `List[List[str]]`, required.
             A list of lists representing the tokenised words and sentences in the document.
-        gold_clusters : ``Optional[List[List[Tuple[int, int]]]]``, optional (default = None)
+        gold_clusters : `Optional[List[List[Tuple[int, int]]]]`, optional (default = None)
             A list of all clusters in the document, represented as word spans. Each cluster
             contains some number of spans, which can be nested and overlap, but will never
             exactly match between clusters.
 
         # Returns
 
-        An ``Instance`` containing the following ``Fields``:
-            text : ``TextField``
+        An `Instance` containing the following `Fields`:
+            text : `TextField`
                 The text of the full document.
-            spans : ``ListField[SpanField]``
-                A ListField containing the spans represented as ``SpanFields``
+            spans : `ListField[SpanField]`
+                A ListField containing the spans represented as `SpanFields`
                 with respect to the document text.
-            span_labels : ``SequenceLabelField``, optional
+            span_labels : `SequenceLabelField`, optional
                 The id of the cluster which each possible span belongs to, or -1 if it does
                  not belong to a cluster. As these labels have variable length (it depends on
-                 how many spans we are considering), we represent this a as a ``SequenceLabelField``
-                 with respect to the ``spans ``ListField``.
+                 how many spans we are considering), we represent this a as a `SequenceLabelField`
+                 with respect to the `spans `ListField`.
         """
         flattened_sentences = [
             self._normalize_word(word) for sentence in sentences for word in sentence
         ]
 
-        metadata: Dict[str, Any] = {"original_text": flattened_sentences}
-        if gold_clusters is not None:
-            metadata["clusters"] = gold_clusters
+        if self._wordpiece_modeling_tokenizer is not None:
+            flat_sentences_tokens, offsets = self._wordpiece_modeling_tokenizer.intra_word_tokenize(
+                flattened_sentences
+            )
+            flattened_sentences = [t.text for t in flat_sentences_tokens]
+        else:
+            flat_sentences_tokens = [Token(word) for word in flattened_sentences]
 
-        text_field = TextField([Token(word) for word in flattened_sentences], self._token_indexers)
+        text_field = TextField(flat_sentences_tokens, self._token_indexers)
 
         cluster_dict = {}
         if gold_clusters is not None:
+            if self._wordpiece_modeling_tokenizer is not None:
+                for cluster in gold_clusters:
+                    for mention_id, mention in enumerate(cluster):
+                        start = offsets[mention[0]][0]
+                        end = offsets[mention[1]][1]
+                        cluster[mention_id] = (start, end)
+
             for cluster_id, cluster in enumerate(gold_clusters):
                 for mention in cluster:
                     cluster_dict[tuple(mention)] = cluster_id
@@ -168,6 +187,27 @@ class ConllCorefReader(DatasetReader):
             for start, end in enumerate_spans(
                 sentence, offset=sentence_offset, max_span_width=self._max_span_width
             ):
+                if self._wordpiece_modeling_tokenizer is not None:
+                    start = offsets[start][0]
+                    end = offsets[end][1]
+
+                    # `enumerate_spans` uses word-level width limit; here we apply it to wordpieces
+                    # We have to do this check here because we use a span width embedding that has
+                    # only `self._max_span_width` entries, and since we are doing wordpiece
+                    # modeling, the span width embedding operates on wordpiece lengths. So a check
+                    # here is necessary or else we wouldn't know how many entries there would be.
+                    if end - start + 1 > self._max_span_width:
+                        continue
+                    # We also don't generate spans that contain special tokens
+                    if start < self._wordpiece_modeling_tokenizer.num_added_start_tokens:
+                        continue
+                    if (
+                        end
+                        >= len(flat_sentences_tokens)
+                        - self._wordpiece_modeling_tokenizer.num_added_end_tokens
+                    ):
+                        continue
+
                 if span_labels is not None:
                     if (start, end) in cluster_dict:
                         span_labels.append(cluster_dict[(start, end)])
@@ -178,6 +218,10 @@ class ConllCorefReader(DatasetReader):
             sentence_offset += len(sentence)
 
         span_field = ListField(spans)
+
+        metadata: Dict[str, Any] = {"original_text": flattened_sentences}
+        if gold_clusters is not None:
+            metadata["clusters"] = gold_clusters
         metadata_field = MetadataField(metadata)
 
         fields: Dict[str, Field] = {

@@ -1,5 +1,5 @@
 """
-The ``CallbackTrainer`` should be considered experimental code.
+The `CallbackTrainer` should be considered experimental code.
 Its API may change at any time, and it may disappear altogether.
 """
 import logging
@@ -9,9 +9,8 @@ import functools
 from typing import Dict, Optional, List, Any, Iterable
 import torch
 
-from allennlp.common import Params
-from allennlp.common.checks import parse_cuda_device, check_for_gpu
-from allennlp.common.tqdm import Tqdm
+from allennlp.common.checks import check_for_gpu
+from allennlp.common import Lazy, Tqdm
 from allennlp.data import Instance
 from allennlp.data.iterators.data_iterator import DataIterator, TensorDict
 from allennlp.models.model import Model
@@ -21,7 +20,6 @@ from allennlp.training.callbacks.callback import Callback
 from allennlp.training.callbacks.callback_handler import CallbackHandler
 from allennlp.training.callbacks.events import Events
 from allennlp.training.optimizers import Optimizer
-from allennlp.training.trainer_pieces import TrainerPieces
 from allennlp.training.trainer_base import TrainerBase
 
 from torch.nn.parallel import DistributedDataParallel
@@ -42,7 +40,7 @@ def handle_errors(method):
     return train_and_handle_errors
 
 
-@TrainerBase.register("callback")
+@TrainerBase.register("callback", constructor="from_partial_objects")
 class CallbackTrainer(TrainerBase):
     def __init__(
         self,
@@ -61,7 +59,7 @@ class CallbackTrainer(TrainerBase):
     ) -> None:
         """
         A trainer for doing supervised learning. It just takes a labeled dataset
-        and a ``DataIterator``, and uses the supplied ``Optimizer`` to learn the weights
+        and a `DataIterator`, and uses the supplied `Optimizer` to learn the weights
         for your model over some fixed number of epochs. It uses callbacks to handle various
         things ancillary to training, like tracking metrics, validation, early stopping,
         logging to tensorboard, and so on.
@@ -72,19 +70,19 @@ class CallbackTrainer(TrainerBase):
 
         # Parameters
 
-        model : ``Model``, required.
+        model : `Model`, required.
             An AllenNLP model to be optimized. Pytorch Modules can also be optimized if
-            their ``forward`` method returns a dictionary with a "loss" key, containing a
+            their `forward` method returns a dictionary with a "loss" key, containing a
             scalar tensor representing the loss function to be optimized.
 
             If you are training your model using GPUs, your model should already be
             on the correct device. (If you use `Trainer.from_params` this will be
             handled for you.)
-        training_data : ``Iterable[Instance]``, required
+        training_data : `Iterable[Instance]`, required
             The instances that you want to train your model on.
-        iterator : ``DataIterator``, required
+        iterator : `DataIterator`, required
             The iterator for batching / epoch-ing the instances.
-        optimizer : ``torch.nn.Optimizer``, required.
+        optimizer : `torch.nn.Optimizer`, required.
             An instance of a Pytorch Optimizer, instantiated with the parameters of the
             model to be optimized.
         num_epochs : int, optional (default=20)
@@ -94,11 +92,11 @@ class CallbackTrainer(TrainerBase):
         serialization_dir : str, optional (default=None)
             Path to directory for saving and loading model files. Models will not be saved if
             this parameter is not passed.
-        cuda_device : ``int``, optional (default=-1)
+        cuda_device : `int`, optional (default=-1)
             An integer or list of integers specifying the CUDA device(s) to use. If -1, the CPU is used.
             Data parallelism is controlled at the allennlp train level, so each trainer will have a single
             GPU.
-        callbacks : ``List[Callback]``, optional (default=None)
+        callbacks : `List[Callback]`, optional (default=None)
             A list of callbacks that will be called based on training events.
         """
         super().__init__(serialization_dir, cuda_device, distributed, rank, world_size)
@@ -171,8 +169,8 @@ class CallbackTrainer(TrainerBase):
 
     def batch_loss(self, batch: TensorDict, for_training: bool) -> torch.Tensor:
         """
-        Does a forward pass on the given batches and returns the ``loss`` value in the result.
-        If ``for_training`` is `True` also applies regularization penalty.
+        Does a forward pass on the given batches and returns the `loss` value in the result.
+        If `for_training` is `True` also applies regularization penalty.
 
         This is a method on the trainer so that it can be used both in training and validation
         (which are handled separately).
@@ -293,26 +291,26 @@ class CallbackTrainer(TrainerBase):
 
         return self.metrics
 
-    # Requires custom from_params.
     @classmethod
-    def from_params(  # type: ignore
+    def from_partial_objects(
         cls,
-        params: Params,
+        model: Model,
         serialization_dir: str,
-        recover: bool = False,
-        cache_directory: str = None,
-        cache_prefix: str = None,
+        iterator: DataIterator,
+        train_data: Iterable[Instance],
+        validation_iterator: DataIterator = None,
+        validation_data: Iterable[Instance] = None,
+        callbacks: List[Lazy[Callback]] = None,
+        local_rank: int = 0,
+        patience: int = None,
+        validation_metric: str = "-loss",
+        shuffle: bool = True,
+        num_epochs: int = 20,
+        cuda_device: int = -1,
+        distributed: bool = False,
+        world_size: int = 1,
+        optimizer: Lazy[Optimizer] = None,
     ) -> "CallbackTrainer":
-        pieces = TrainerPieces.from_params(
-            params, serialization_dir, recover, cache_directory, cache_prefix
-        )
-        model = pieces.model
-        params = pieces.params
-        validation_iterator = pieces.validation_iterator or pieces.iterator
-
-        shuffle = params.pop_bool("shuffle", True)
-        num_epochs = params.pop_int("num_epochs", 20)
-        cuda_device = parse_cuda_device(params.pop("cuda_device", -1))
 
         check_for_gpu(cuda_device)
         if cuda_device >= 0:
@@ -321,43 +319,34 @@ class CallbackTrainer(TrainerBase):
             model = model.cuda(cuda_device)
 
         parameters = [[n, p] for n, p in model.named_parameters() if p.requires_grad]
-        optimizer = Optimizer.from_params(parameters, params.pop("optimizer"))
+        optimizer_ = optimizer.construct(model_parameters=parameters)
 
-        callbacks_params = params.pop("callbacks", [])
-        callbacks: List[Callback] = [
-            Callback.from_params(
-                params=callback_params,
-                model=model,
-                optimizer=optimizer,
-                instances=pieces.train_dataset,
-                iterator=pieces.iterator,
-                shuffle=shuffle,
-                validation_data=pieces.validation_dataset,
-                validation_iterator=validation_iterator,
-                serialization_dir=serialization_dir,
-            )
-            for callback_params in callbacks_params
-        ]
-
-        distributed = params.pop_bool("distributed", False)
-        world_size = params.pop_int("world_size", 1)
+        if not callbacks:
+            callbacks = []
+        else:
+            constructed_callbacks = []
+            for callback in callbacks:
+                # We only need to pass here the things that weren't already passed to
+                # CallbackTrainer.from_partial_objects; FromParams will automatically pass those
+                # things through to the callback constructor.
+                callback_ = callback.construct(optimizer=optimizer, instances=train_data)
+                constructed_callbacks.append(callback_)
 
         if distributed:
             rank = cuda_device
         else:
             rank = 0
 
-        params.assert_empty(cls.__name__)
         return cls(
             model,
-            pieces.train_dataset,
-            pieces.iterator,
-            optimizer,
+            train_data,
+            iterator,
+            optimizer_,
             num_epochs=num_epochs,
             shuffle=shuffle,
             serialization_dir=serialization_dir,
             cuda_device=cuda_device,
-            callbacks=callbacks,
+            callbacks=constructed_callbacks,
             distributed=distributed,
             rank=rank,
             world_size=world_size,

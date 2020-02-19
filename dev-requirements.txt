@@ -4,13 +4,13 @@
 flake8
 
 # Static type checking
-mypy==0.730
+mypy==0.761
 
 # Automatic code formatting
 black
 
 # For creating git precommit hooks
-pre-commit==1.18.3
+pre-commit==2.1.0
 
 # Allows generation of coverage reports with pytest.
 pytest-cov
@@ -18,6 +18,9 @@ pytest-cov
 # Allows codecov to generate coverage reports
 coverage
 codecov
+
+# Optional dependencies, which we install for testing purposes.
+matplotlib>=2.2.3
 
 # Required to run sanic tests
 aiohttp
@@ -27,13 +30,14 @@ aiohttp
 # YAML manipulation
 ruamel.yaml
 
-pydoc-markdown==2.0.5
+mathy_pydoc>=0.6.7,<0.7.0
 markdown-include==0.5.1
 # Package for the material theme for mkdocs
-mkdocs-material==4.6.0
+mkdocs-material==4.6.3
 
-# Only used to convert our readme to reStructuredText on Pypi.
-pypandoc
+#### PACKAGE-UPLOAD PACKAGES ####
 
 # Pypi uploads
 twine>=1.11.0
+setuptools
+wheel

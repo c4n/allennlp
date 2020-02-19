@@ -1,18 +1,18 @@
-import torch
+from typing import Any, Iterable, Dict
+
 import pytest
-
+import torch
 from overrides import overrides
-from typing import Tuple, Any, Iterable, Dict
 
+from allennlp.common import Params
+from allennlp.common.checks import ConfigurationError
 from allennlp.common.testing import AllenNlpTestCase
+from allennlp.common.util import END_SYMBOL, prepare_environment, START_SYMBOL
 from allennlp.data.vocabulary import Vocabulary
 from allennlp.modules import Embedding
 from allennlp.modules.seq2seq_decoders import AutoRegressiveSeqDecoder
 from allennlp.modules.seq2seq_decoders import StackedSelfAttentionDecoderNet
-from allennlp.common.checks import ConfigurationError
-from allennlp.common.util import START_SYMBOL, END_SYMBOL, prepare_environment
 from allennlp.training.metrics import BLEU, Metric
-from allennlp.common import Params
 
 
 def create_vocab_and_decoder_net(decoder_inout_dim):
@@ -97,7 +97,7 @@ class TestAutoRegressiveSeqDecoder(AllenNlpTestCase):
 
         encoded_state = torch.rand(batch_size, time_steps, decoder_inout_dim)
         source_mask = torch.ones(batch_size, time_steps).long()
-        target_tokens = {"tokens": torch.ones(batch_size, time_steps).long()}
+        target_tokens = {"tokens": {"tokens": torch.ones(batch_size, time_steps).long()}}
         source_mask[0, 1:] = 0
         encoder_out = {"source_mask": source_mask, "encoder_outputs": encoded_state}
 
@@ -157,7 +157,7 @@ class TestAutoRegressiveSeqDecoder(AllenNlpTestCase):
 
         encoded_state = torch.randn(batch_size, time_steps, decoder_inout_dim)
         source_mask = torch.ones(batch_size, time_steps).long()
-        target_tokens = {"tokens": torch.ones(batch_size, time_steps).long()}
+        target_tokens = {"tokens": {"tokens": torch.ones(batch_size, time_steps).long()}}
         source_mask[0, 1:] = 0
         encoder_out = {"source_mask": source_mask, "encoder_outputs": encoded_state}
 
