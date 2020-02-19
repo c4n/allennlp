@@ -50,9 +50,9 @@ def move_to_device(obj, cuda_device: int):
         return [move_to_device(item, cuda_device) for item in obj]
     elif isinstance(obj, tuple) and hasattr(obj, "_fields"):
         # This is the best way to detect a NamedTuple, it turns out.
-        return obj.__class__(*[move_to_device(item, cuda_device) for item in obj])
+        return obj.__class__(*(move_to_device(item, cuda_device) for item in obj))
     elif isinstance(obj, tuple):
-        return tuple([move_to_device(item, cuda_device) for item in obj])
+        return tuple(move_to_device(item, cuda_device) for item in obj)
     else:
         return obj
 
@@ -886,13 +886,13 @@ def tensors_equal(tensor1: torch.Tensor, tensor2: torch.Tensor, tolerance: float
     if isinstance(tensor1, (list, tuple)):
         if not isinstance(tensor2, (list, tuple)) or len(tensor1) != len(tensor2):
             return False
-        return all([tensors_equal(t1, t2, tolerance) for t1, t2 in zip(tensor1, tensor2)])
+        return all(tensors_equal(t1, t2, tolerance) for t1, t2 in zip(tensor1, tensor2))
     elif isinstance(tensor1, dict):
         if not isinstance(tensor2, dict):
             return False
         if tensor1.keys() != tensor2.keys():
             return False
-        return all([tensors_equal(tensor1[key], tensor2[key], tolerance) for key in tensor1])
+        return all(tensors_equal(tensor1[key], tensor2[key], tolerance) for key in tensor1)
     elif isinstance(tensor1, torch.Tensor):
         if not isinstance(tensor2, torch.Tensor):
             return False
@@ -1106,7 +1106,7 @@ def get_combined_dim(combination: str, tensor_dims: List[int]) -> int:
     if len(tensor_dims) > 9:
         raise ConfigurationError("Double-digit tensor lists not currently supported")
     combination = combination.replace("x", "1").replace("y", "2")
-    return sum([_get_combination_dim(piece, tensor_dims) for piece in combination.split(",")])
+    return sum(_get_combination_dim(piece, tensor_dims) for piece in combination.split(","))
 
 
 def _get_combination_dim(combination: str, tensor_dims: List[int]) -> int:
@@ -1571,7 +1571,7 @@ def add_positional_features(
 
 def clone(module: torch.nn.Module, num_copies: int) -> torch.nn.ModuleList:
     """Produce N identical layers."""
-    return torch.nn.ModuleList([copy.deepcopy(module) for _ in range(num_copies)])
+    return torch.nn.ModuleList(copy.deepcopy(module) for _ in range(num_copies))
 
 
 def combine_initial_dims(tensor: torch.Tensor) -> torch.Tensor:
@@ -1678,3 +1678,33 @@ def find_embedding_layer(model: torch.nn.Module) -> torch.nn.Module:
                             return embedder
             return module
     raise RuntimeError("No embedding module found!")
+
+
+def extend_layer(layer: torch.nn.Module, new_dim: int) -> None:
+    valid_layers = [torch.nn.Linear, torch.nn.Bilinear]
+    if not any([isinstance(layer, i) for i in valid_layers]):
+        raise ConfigurationError("Inappropriate layer type")
+
+    extend_dim = new_dim - layer.out_features
+    if not extend_dim:
+        return layer
+
+    if isinstance(layer, torch.nn.Linear):
+        new_weight = torch.FloatTensor(extend_dim, layer.in_features)
+    elif isinstance(layer, torch.nn.Bilinear):
+        new_weight = torch.FloatTensor(extend_dim, layer.in1_features, layer.in2_features)
+
+    new_bias = torch.FloatTensor(extend_dim)
+    torch.nn.init.xavier_uniform_(new_weight)
+    torch.nn.init.zeros_(new_bias)
+
+    device = layer.weight.device
+    layer.weight = torch.nn.Parameter(
+        torch.cat([layer.weight.data, new_weight.to(device)], dim=0),
+        requires_grad=layer.weight.requires_grad,
+    )
+    layer.bias = torch.nn.Parameter(
+        torch.cat([layer.bias.data, new_bias.to(device)], dim=0),
+        requires_grad=layer.bias.requires_grad,
+    )
+    layer.out_features = new_dim

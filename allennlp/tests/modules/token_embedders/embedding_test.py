@@ -5,21 +5,21 @@ import numpy
 import pytest
 import torch
 
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=FutureWarning)
-    import h5py
-
 from allennlp.common import Params
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.testing import AllenNlpTestCase
 from allennlp.data import Vocabulary
 from allennlp.modules.token_embedders.embedding import (
-    Embedding,
     _read_pretrained_embeddings_file,
+    Embedding,
     EmbeddingsTextFile,
     format_embeddings_file_uri,
     parse_embeddings_file_uri,
 )
+
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    import h5py
 
 
 class TestEmbedding(AllenNlpTestCase):
@@ -350,3 +350,26 @@ class TestEmbedding(AllenNlpTestCase):
         embedder = Embedding.from_vocab_or_file(vocab, **embedding_params.as_dict(quiet=True))
         with pytest.raises(ConfigurationError):
             embedder.extend_vocab(Vocabulary(), "tokens")
+
+    def test_embedding_constructed_directly_with_pretrained_file(self):
+
+        vocab = Vocabulary()
+        vocab.add_token_to_namespace("word")
+        vocab.add_token_to_namespace("word2")
+        unicode_space = "\xa0\xa0\xa0\xa0\xa0\xa0\xa0\xa0"
+        vocab.add_token_to_namespace(unicode_space)
+        embeddings_filename = str(self.TEST_DIR / "embeddings.gz")
+        with gzip.open(embeddings_filename, "wb") as embeddings_file:
+            embeddings_file.write("word 1.0 2.3 -1.0\n".encode("utf-8"))
+            embeddings_file.write(f"{unicode_space} 3.4 3.3 5.0\n".encode("utf-8"))
+
+        num_embeddings = vocab.get_vocab_size()
+        embedding_layer = Embedding(
+            num_embeddings, embedding_dim=3, pretrained_file=embeddings_filename, vocabulary=vocab
+        )
+        word_vector = embedding_layer.weight.data[vocab.get_token_index("word")]
+        assert numpy.allclose(word_vector.numpy(), numpy.array([1.0, 2.3, -1.0]))
+        word_vector = embedding_layer.weight.data[vocab.get_token_index(unicode_space)]
+        assert numpy.allclose(word_vector.numpy(), numpy.array([3.4, 3.3, 5.0]))
+        word_vector = embedding_layer.weight.data[vocab.get_token_index("word2")]
+        assert not numpy.allclose(word_vector.numpy(), numpy.array([1.0, 2.3, -1.0]))

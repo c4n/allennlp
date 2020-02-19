@@ -41,6 +41,7 @@ method.
 """
 
 from copy import deepcopy
+from pathlib import Path
 from typing import TypeVar, Type, Callable, Dict, Union, Any, cast, List, Tuple, Set
 import inspect
 import logging
@@ -87,13 +88,9 @@ def takes_kwargs(obj) -> bool:
         signature = inspect.signature(obj)
     else:
         raise ConfigurationError(f"object {obj} is not callable")
-    return bool(
-        any(
-            [
-                p.kind == inspect.Parameter.VAR_KEYWORD  # type: ignore
-                for p in signature.parameters.values()
-            ]
-        )
+    return any(
+        p.kind == inspect.Parameter.VAR_KEYWORD  # type: ignore
+        for p in signature.parameters.values()
     )
 
 
@@ -107,7 +104,7 @@ def can_construct_from_params(type_: Type) -> bool:
         if hasattr(type_, "from_params"):
             return True
         args = getattr(type_, "__args__")
-        return all([can_construct_from_params(arg) for arg in args])
+        return all(can_construct_from_params(arg) for arg in args)
     return hasattr(type_, "from_params")
 
 
@@ -338,14 +335,24 @@ def construct_arg(
 
     # If the parameter type is a Python primitive, just pop it off
     # using the correct casting pop_xyz operation.
+    elif annotation in {int, bool}:
+        if type(popped_params) in {int, bool}:
+            return annotation(popped_params)
+        else:
+            raise TypeError(f"Expected {argument_name} to be a {annotation.__name__}.")
     elif annotation == str:
-        return popped_params
-    elif annotation == int:
-        return int(popped_params)  # type: ignore
-    elif annotation == bool:
-        return bool(popped_params)
+        # Strings are special because we allow casting from Path to str.
+        if type(popped_params) == str or isinstance(popped_params, Path):
+            return str(popped_params)  # type: ignore
+        else:
+            raise TypeError(f"Expected {argument_name} to be a string.")
     elif annotation == float:
-        return float(popped_params)  # type: ignore
+        # Floats are special because in Python, you can put an int wherever you can put a float.
+        # https://mypy.readthedocs.io/en/stable/duck_type_compatibility.html
+        if type(popped_params) in {int, float}:
+            return popped_params
+        else:
+            raise TypeError(f"Expected {argument_name} to be numeric.")
 
     # This is special logic for handling types like Dict[str, TokenIndexer],
     # List[TokenIndexer], Tuple[TokenIndexer, Tokenizer], and Set[TokenIndexer],

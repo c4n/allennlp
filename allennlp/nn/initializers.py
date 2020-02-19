@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 class Initializer(Registrable):
     """
     An initializer is really just a bare pytorch function. This class
-    is a proxy that allows us to implement `Registerable` for those functions.
+    is a proxy that allows us to implement `Registrable` for those functions.
     """
 
     default_implementation = "normal"
@@ -117,7 +117,7 @@ def block_orthogonal(tensor: torch.Tensor, split_sizes: List[int], gain: float =
     """
     data = tensor.data
     sizes = list(tensor.size())
-    if any([a % b != 0 for a, b in zip(sizes, split_sizes)]):
+    if any(a % b != 0 for a, b in zip(sizes, split_sizes)):
         raise ConfigurationError(
             "tensor dimensions must be divisible by their respective "
             "split_sizes. Found size: {} and split_sizes: {}".format(sizes, split_sizes)
@@ -134,7 +134,7 @@ def block_orthogonal(tensor: torch.Tensor, split_sizes: List[int], gain: float =
         # of dimensions. The actual slices we need are the
         # start_index: start_index + step for each dimension in the tensor.
         block_slice = tuple(
-            [slice(start_index, start_index + step) for start_index, step in index_and_step_tuples]
+            slice(start_index, start_index + step) for start_index, step in index_and_step_tuples
         )
         data[block_slice] = torch.nn.init.orthogonal_(tensor[block_slice].contiguous(), gain=gain)
 
