@@ -11,7 +11,7 @@ import torch.distributed as dist
 import torch.optim.lr_scheduler
 from torch.nn.parallel import DistributedDataParallel
 
-from allennlp.common import Params
+from allennlp.common import Params, Lazy
 from allennlp.common.checks import ConfigurationError, parse_cuda_device, check_for_gpu
 from allennlp.common.tqdm import Tqdm
 from allennlp.common.util import dump_metrics, gpu_memory_mb, peak_memory_mb, lazy_groups_of
@@ -960,3 +960,84 @@ class AdversarialTrainer(TrainerBase):
             num_gradient_accumulation_steps=num_gradient_accumulation_steps,
             attacker=attacker,
         )
+
+    @classmethod
+    def from_partial_objects(
+        cls,
+        model: Model,
+        optimizer:  Lazy[Optimizer],
+        iterator: DataIterator,
+        dataset_reader : DatasetReader,
+        train_dataset: Iterable[Instance],
+        validation_dataset: Optional[Iterable[Instance]] = None,
+        patience: Optional[int] = None,
+        validation_metric: str = "-loss",
+        validation_iterator: DataIterator = None,
+        shuffle: bool = True,
+        num_epochs: int = 20,
+        serialization_dir: Optional[str] = None,
+        num_serialized_models_to_keep: int = 20,
+        keep_serialized_model_every_num_seconds: int = None,
+        checkpointer: Checkpointer = None,
+        model_save_interval: float = None,
+        cuda_device: int = -1,
+        grad_norm: Optional[float] = None,
+        grad_clipping: Optional[float] = None,
+        learning_rate_scheduler: Optional[LearningRateScheduler] = None,
+        momentum_scheduler: Optional[MomentumScheduler] = None,
+        summary_interval: int = 100,
+        histogram_interval: int = None,
+        should_log_parameter_statistics: bool = True,
+        should_log_learning_rate: bool = False,
+        log_batch_size_period: Optional[int] = None,
+        moving_average: Optional[MovingAverage] = None,
+        distributed: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
+        num_gradient_accumulation_steps: int = 1,
+        attacker : Attacker = None,
+    ) -> "AdversarialTrainer":
+        train_dataset = data_reader.read("")
+        validation_dataset = data_reader.read("")
+        
+        model_params = [[n, p] for n, p in model.named_parameters() if p.requires_grad]
+        optimizer = optimizer.construct(model_parameters=tagger_params)
+
+      
+        return cls(
+        model,
+        optimizer,
+        iterator,
+        dataset_reader,
+        train_dataset,
+        validation_dataset,
+        patience,
+        validation_metric,
+        validation_iterator,
+        shuffle,
+        num_epochs,
+        serialization_dir,
+        num_serialized_models_to_keep,
+        keep_serialized_model_every_num_seconds,
+        checkpointer,
+        model_save_interval,
+        cuda_device,
+        grad_norm,
+        grad_clipping,
+        learning_rate_scheduler,
+        momentum_scheduler,
+        summary_interval,
+        histogram_interval,
+        should_log_parameter_statistics,
+        should_log_learning_rate,
+        log_batch_size_period,
+        moving_average,
+        distributed,
+        rank,
+        world_size,
+        num_gradient_accumulation_steps,
+        attacker
+        )
+    
+    
+    
