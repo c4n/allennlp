@@ -27,15 +27,17 @@ from allennlp.training.momentum_schedulers import MomentumScheduler
 from allennlp.training.moving_average import MovingAverage
 from allennlp.training.optimizers import Optimizer
 from allennlp.training.tensorboard_writer import TensorboardWriter
-from allennlp.training.trainer_base import TrainerBase
+
 
 ###my additions
+from allennlp.training.trainer_base import TrainerBase
 from allennlp.interpret.attackers.attacker import Attacker
 from allennlp.predictors.sentence_tagger import SentenceTaggerPredictor
 from allennlp.data import DatasetReader, Instance
 from allennlp.data.tokenizers import Token
 import copy
 import random
+
 
 logger = logging.getLogger(__name__)
 
@@ -531,12 +533,19 @@ class AdversarialTrainer(TrainerBase):
                     adv_instance = self.dataset_reader.text_to_instance(tokens = adversarial_tokens, ner_tags = clean_tags )
                     adv_instance.fields['tokens'].index(self.model.vocab)
                     adv_data.append(adv_instance)
-#                 else:
-#                     adv_data.append(sample)
+                else:
+                    adv_data.append(sample)
             ##eval attack###
             adv_results = training_util.evaluate(self.model, adv_data, self.iterator, 0, None )
             adv_results = dict(("adv_"+k,f(v) if hasattr(v,'keys') else v) for k,v in adv_results.items())
             ##attack##
+            
+            #log result
+            if self._tensorboard.should_log_this_batch() and self._master:
+                for k,v in adv_results.items():
+                    self._tensorboard.add_train_scalar(k,v)
+
+
             
         return adv_results, adv_data    
 
@@ -667,7 +676,6 @@ class AdversarialTrainer(TrainerBase):
                     self._metric_tracker.add_metric(this_epoch_val_metric)
                    
                     if self._metric_tracker.should_stop_early():
-                        breakpoint()
                         logger.info("Ran out of patience.  Stopping training.")
                         break
 
@@ -875,7 +883,7 @@ class AdversarialTrainer(TrainerBase):
             model = model.cuda(cuda_device)
 
         parameters = [[n, p] for n, p in model.named_parameters() if p.requires_grad]
-        optimizer = Optimizer.from_params(parameters, params.pop("optimizer"))
+        optimizer = Optimizer.from_params(model_parameters=parameters, params=params.pop("optimizer"))
         if "moving_average" in params:
             moving_average = MovingAverage.from_params(
                 params.pop("moving_average"), parameters=parameters
@@ -1038,6 +1046,8 @@ class AdversarialTrainer(TrainerBase):
         num_gradient_accumulation_steps,
         attacker
         )
+    
+
     
     
     
