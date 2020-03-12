@@ -4,10 +4,11 @@ declarative language (JSON) for defining experiments and models.
 
 This is implemented by giving each AllenNLP class a method
 
-.. code-block
+```
     @classmethod
     def from_params(cls, params: Params, **extras) -> 'ClassName':
         ...
+```
 
 that contains the logic for instantiating a class instance from a JSON-like
 `Params` object. Historically you had to implement your own `from_params`
@@ -39,10 +40,23 @@ to include more elaborate logic than "pop off params and hand them to the constr
 In this case your class just needs to explicitly implement its own `from_params`
 method.
 """
-
+import collections.abc
 from copy import deepcopy
 from pathlib import Path
-from typing import TypeVar, Type, Callable, Dict, Union, Any, cast, List, Tuple, Set
+from typing import (
+    Any,
+    Callable,
+    cast,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Set,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 import inspect
 import logging
 
@@ -357,7 +371,11 @@ def construct_arg(
     # This is special logic for handling types like Dict[str, TokenIndexer],
     # List[TokenIndexer], Tuple[TokenIndexer, Tokenizer], and Set[TokenIndexer],
     # which it creates by instantiating each value from_params and returning the resulting structure.
-    elif origin in (Dict, dict) and len(args) == 2 and can_construct_from_params(args[-1]):
+    elif (
+        origin in {collections.abc.Mapping, Mapping, Dict, dict}
+        and len(args) == 2
+        and can_construct_from_params(args[-1])
+    ):
         value_cls = annotation.__args__[-1]
 
         value_dict = {}
@@ -373,24 +391,6 @@ def construct_arg(
             )
 
         return value_dict
-
-    elif origin in (List, list) and len(args) == 1 and can_construct_from_params(args[0]):
-        value_cls = annotation.__args__[0]
-
-        value_list = []
-
-        for i, value_params in enumerate(popped_params):
-            value = construct_arg(
-                str(value_cls),
-                argument_name + f".{i}",
-                value_params,
-                value_cls,
-                _NO_DEFAULT,
-                **extras,
-            )
-            value_list.append(value)
-
-        return value_list
 
     elif origin in (Tuple, tuple) and all(can_construct_from_params(arg) for arg in args):
         value_list = []
@@ -462,10 +462,38 @@ def construct_arg(
             # in subextras with what's in kwargs.  If an argument shows up twice, we should take it
             # from what's passed to Lazy.construct() instead of what we got from create_extras().
             # Almost certainly these will be identical objects, anyway.
-            subextras.update(kwargs)
-            return value_cls.from_params(params=popped_params, **subextras)
+            # We do this by constructing a new dictionary, instead of mutating subextras, just in
+            # case this constructor is called multiple times.
+            constructor_extras = {**subextras, **kwargs}
+            return value_cls.from_params(params=deepcopy(popped_params), **constructor_extras)
 
         return Lazy(constructor)  # type: ignore
+
+    # For any other kind of iterable, we will just assume that a list is good enough, and treat
+    # it the same as List. This condition needs to be at the end, so we don't catch other kinds
+    # of Iterables with this branch.
+    elif (
+        origin in {collections.abc.Iterable, Iterable, List, list}
+        and len(args) == 1
+        and can_construct_from_params(args[0])
+    ):
+        value_cls = annotation.__args__[0]
+
+        value_list = []
+
+        for i, value_params in enumerate(popped_params):
+            value = construct_arg(
+                str(value_cls),
+                argument_name + f".{i}",
+                value_params,
+                value_cls,
+                _NO_DEFAULT,
+                **extras,
+            )
+            value_list.append(value)
+
+        return value_list
+
     else:
         # Pass it on as is and hope for the best.   ¯\_(ツ)_/¯
         if isinstance(popped_params, Params):
@@ -511,7 +539,7 @@ class FromParams:
 
         from allennlp.common.registrable import Registrable  # import here to avoid circular imports
 
-        logger.info(
+        logger.debug(
             f"instantiating class {cls} from params {getattr(params, 'params', params)} "
             f"and extras {set(extras.keys())}"
         )
