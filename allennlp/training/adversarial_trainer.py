@@ -210,14 +210,15 @@ class AdversarialTrainer(TrainerBase):
         # I am not calling move_to_gpu here, because if the model is
         # not already on the GPU then the optimizer is going to be wrong.
         self.model = model
+        self.cuda_device = cuda_device
 
         self.iterator = iterator
         self._validation_iterator = validation_iterator
         self.shuffle = shuffle
         self.optimizer = optimizer
-        self.train_data = train_dataset
-        self.train_data_original = train_dataset
-        self._validation_data = validation_dataset
+        self.train_data =  copy.deepcopy(train_dataset)
+        self.train_data_original = copy.deepcopy(train_dataset)
+        self._validation_data =  copy.deepcopy(validation_dataset)
         
         ## additional stuffs for adv. attack
         self.attacker = attacker
@@ -530,13 +531,14 @@ class AdversarialTrainer(TrainerBase):
                     #get clean tag and create adversarial instance
                     clean_tags = sample.fields['tags'].labels
                     self.dataset_reader.coding_scheme = "BIOUL-adv" #this is just a decoy, so the code doesn't convert the alreadt converted labels
-                    adv_instance = self.dataset_reader.text_to_instance(tokens = adversarial_tokens, ner_tags = clean_tags )
+                    adv_instance = self.dataset_reader.text_to_instance(tokens = adversarial_tokens, ner_tags = clean_tags, adv_tags = attack['adversarial_list'] )
                     adv_instance.fields['tokens'].index(self.model.vocab)
                     adv_data.append(adv_instance)
-                else:
-                    adv_data.append(sample)
+#                 else:
+#                     new_sample  = copy.deepcopy(sample) #make sure there's no reference to the original sample
+#                     adv_data.append(new_sample)
             ##eval attack###
-            adv_results = training_util.evaluate(self.model, adv_data, self.iterator, 0, None )
+            adv_results = training_util.evaluate(self.model, adv_data, self.iterator, self.cuda_device, None )
             adv_results = dict(("adv_"+k,f(v) if hasattr(v,'keys') else v) for k,v in adv_results.items())
             ##attack##
             
@@ -545,8 +547,6 @@ class AdversarialTrainer(TrainerBase):
                 for k,v in adv_results.items():
                     self._tensorboard.add_train_scalar(k,v)
 
-
-            
         return adv_results, adv_data    
 
     def _validation_loss(self) -> Tuple[float, int]:
@@ -636,7 +636,7 @@ class AdversarialTrainer(TrainerBase):
             # if .. train else attack
             adv_out, self.adv_data = self._attack_epoch(epoch)
             adv_metrics.update(adv_out)
-            self.train_data = self.adv_data
+            self.train_data =self.train_data_original+copy.deepcopy(self.adv_data)
                       
             
             # get peak of memory usage

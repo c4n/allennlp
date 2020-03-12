@@ -162,23 +162,20 @@ class MyHotflip(Attacker):
                 all_indices = [
                     self.vocab.get_token_index(token, self.namespace) for token in all_tokens
                 ]
-                inputs[indexer_name] = torch.LongTensor(all_indices).unsqueeze(0)
+                inputs[indexer_name] = {"tokens": torch.LongTensor(all_indices).unsqueeze(0)}
             elif isinstance(token_indexer, TokenCharactersIndexer):
                 tokens = [Token(x) for x in all_tokens]
                 max_token_length = max(len(x) for x in all_tokens)
                 # sometime max_token_length is too short for cnn encoder
-                max_token_length = max(max_token_length, token_indexer._min_padding_length, 3)
-                indexed_tokens = token_indexer.tokens_to_indices(
-                    tokens, self.vocab, "token_characters"
-                )
-                padded_tokens = token_indexer.as_padded_tensor(
-                    indexed_tokens,
-                    {"token_characters": len(tokens)},
-                    {"num_token_characters": max_token_length},
-                )
-                inputs[indexer_name] = torch.LongTensor(
-                    padded_tokens["token_characters"]
-                ).unsqueeze(0)
+                max_token_length = max(max_token_length, token_indexer._min_padding_length)
+                indexed_tokens = token_indexer.tokens_to_indices(tokens, self.vocab)
+                padding_lengths = token_indexer.get_padding_lengths(indexed_tokens)
+                padded_tokens = token_indexer.as_padded_tensor_dict(indexed_tokens, padding_lengths)
+                inputs[indexer_name] = {
+                    "token_characters": torch.LongTensor(
+                        padded_tokens["token_characters"]
+                    ).unsqueeze(0)
+                }
             elif isinstance(token_indexer, ELMoTokenCharactersIndexer):
                 elmo_tokens = []
                 for token in all_tokens:
@@ -186,12 +183,11 @@ class MyHotflip(Attacker):
                         [Token(text=token)], self.vocab, "sentence"
                     )["sentence"]
                     elmo_tokens.append(elmo_indexed_token[0])
-                inputs[indexer_name] = torch.LongTensor(elmo_tokens).unsqueeze(0)
+                inputs[indexer_name] = {"tokens": torch.LongTensor(elmo_tokens).unsqueeze(0)}
             else:
                 raise RuntimeError("Unsupported token indexer:", token_indexer)
 
         return util.move_to_device(inputs, self.cuda_device)
-
     def attack_from_instance(
         self,
         input_instance: Instance,
@@ -271,7 +267,8 @@ class MyHotflip(Attacker):
 
         # if all tags are Os, don't attack.
         if all(tag == "O" for tag in output_dict["tags"]):
-            return sanitize({"final": [original_tokens], "original": original_tokens})
+            return sanitize({"final": [original_tokens], "original": original_tokens
+                             ,'adversarial_list':['clean']*len(original_tokens)})
 
         final_tokens = []
         # `original_instances` is a list because there might be several different predictions that
@@ -299,6 +296,7 @@ class MyHotflip(Attacker):
         # Ignore any token that is in the ignore_tokens list by setting the token to already
         # flipped.
         flipped: List[int] = []
+        attacked: List[int] = []    
         for index, token in enumerate(text_field.tokens):
             if token.text in ignore_tokens or len(token.text) <= 3:
                 flipped.append(index)
@@ -330,11 +328,10 @@ class MyHotflip(Attacker):
                 # If we've already flipped all of the tokens, we give up.
                 break
             flipped.append(index_of_token_to_flip)
+            attacked.append(index_of_token_to_flip)
 
-            # TODO(mattg): This is quite a bit of a hack for getting the vocab id...  I don't
-            # have better ideas at the moment, though.
-            indexer_name = self.namespace
-            input_tokens = text_field._indexed_tokens[indexer_name]
+            text_field_tensors = text_field.as_tensor(text_field.get_padding_lengths())
+            input_tokens = util.get_token_ids_from_text_field_tensors(text_field_tensors)
             original_id_of_token_to_flip = input_tokens[index_of_token_to_flip]
             token_to_flip = text_field.tokens[index_of_token_to_flip]
 
@@ -384,8 +381,16 @@ class MyHotflip(Attacker):
                 break
 
         final_tokens.append(text_field.tokens)
-        #no output version for training only
-        return sanitize({"final": final_tokens, "original": original_tokens, "outputs": outputs})
+        #adversarial_list
+        adv_list = []       
+        for i in range(len(text_field.tokens)):
+            if i in attacked:
+                adv_list.append("adversarial")
+            else:
+                adv_list.append("clean")
+                
+        
+        return sanitize({"final": final_tokens, "original": original_tokens, "adversarial_list": adv_list})
 
 #         return sanitize({"final": final_tokens, "original": original_tokens, "outputs": outputs})
 
@@ -439,7 +444,7 @@ class MyHotflip(Attacker):
         #         # _towards_ the target.
         #         sign = -1 if target is None else 1
         instance = self.predictor._json_to_instance(inputs)
-        return self.oneshot_attack_from_instance(instance)
+#         return self.oneshot_attack_from_instance(instance)
         return self.attack_from_instance(instance)
 
     def _first_order_taylor(
@@ -459,7 +464,7 @@ class MyHotflip(Attacker):
             # This happens when we've truncated our fake embedding matrix.  We need to do a dot
             # product with the word vector of the current token; if that token is out of
             # vocabulary for our truncated matrix, we need to run it through the embedding layer.
-            inputs = self._make_embedder_input([self.vocab.get_token_from_index(token_idx)])
+            inputs = self._make_embedder_input([self.vocab.get_token_from_index(token_idx.item())])
             word_embedding = self.embedding_layer(inputs)[0]
         else:
             word_embedding = torch.nn.functional.embedding(
@@ -554,7 +559,8 @@ class MyHotflip(Attacker):
 
         # if all tags are Os, don't attack.
         if all(tag == "O" for tag in output_dict["tags"]):
-            return sanitize({"final": [original_tokens], "original": original_tokens})
+            return sanitize({"final": [original_tokens], "original": original_tokens
+                             ,'adversarial_list':['clean']*len(original_tokens)})
 
         final_tokens = []
         # `original_instances` is a list because there might be several different predictions that
@@ -604,12 +610,9 @@ class MyHotflip(Attacker):
                 break
             flipped.append(index_of_token_to_flip)
 
-            # TODO(mattg): This is quite a bit of a hack for getting the vocab id...  I don't
-            # have better ideas at the moment, though.
-            indexer_name = self.namespace
-            input_tokens = text_field._indexed_tokens[indexer_name]
+            text_field_tensors = text_field.as_tensor(text_field.get_padding_lengths())
+            input_tokens = util.get_token_ids_from_text_field_tensors(text_field_tensors)
             original_id_of_token_to_flip = input_tokens[index_of_token_to_flip]
-            token_to_flip = text_field.tokens[index_of_token_to_flip]
 
             # Get new token using taylor approximation.
             new_word = self._first_order_taylor(

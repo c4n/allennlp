@@ -161,7 +161,8 @@ class BlackBox(Attacker):
 
         # if all tags are Os, don't attack.
         if all(tag == "O" for tag in output_dict["tags"]):
-            return sanitize({"final": [original_tokens], "original": original_tokens})
+            return sanitize({"final": [original_tokens], "original": original_tokens
+                             ,'adversarial_list':['clean']*len(original_tokens)})
 
         final_tokens = []
         # `original_instances` is a list because there might be several different predictions that
@@ -214,28 +215,11 @@ class BlackBox(Attacker):
             else:
                 adv_list.append("clean")
                 
-#         input_instance.add_field(
-#             "adv_category", SequenceLabelField(output_dict["adv_category"], text_field), self.predictor._model.vocab
-#         )
-    
-#         grads, outputs = self.predictor.get_gradients([instance])  # predictions
 
-#         for key, output in outputs.items():
-#             if isinstance(output, torch.Tensor):
-#                 outputs[key] = output.detach().cpu().numpy().squeeze()
-#             elif isinstance(output, list):
-#                 outputs[key] = output[0]
-
-#             # TODO(mattg): taking the first result here seems brittle, if we're in a case where
-#             # there are multiple predictions.
-#         adv_labeled_instances = self.predictor.predictions_to_labeled_instances(
-#             instance, outputs
-#         )
-            
 
         final_tokens.append(text_field.tokens)
         #no output version for training only
-        return sanitize({"final": final_tokens, "original": original_tokens})
+        return sanitize({"final": final_tokens, "original": original_tokens,"adversarial_list":adv_list})
 
 #         return sanitize({"final": final_tokens, "original": original_tokens, "outputs": outputs})
 
