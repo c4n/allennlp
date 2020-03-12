@@ -16,7 +16,7 @@ from allennlp.common.checks import ConfigurationError, parse_cuda_device, check_
 from allennlp.common.tqdm import Tqdm
 from allennlp.common.util import dump_metrics, gpu_memory_mb, peak_memory_mb, lazy_groups_of
 from allennlp.data.instance import Instance
-from allennlp.data.iterators.data_iterator import DataIterator, TensorDict
+# from allennlp.data.iterators.data_iterator import DataIterator, TensorDict
 from allennlp.models.model import Model
 from allennlp.nn import util as nn_util
 from allennlp.training import util as training_util
