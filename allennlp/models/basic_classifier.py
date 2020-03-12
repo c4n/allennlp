@@ -115,7 +115,7 @@ class BasicClassifier(Model):
             A scalar loss to be optimised.
         """
         embedded_text = self._text_field_embedder(tokens)
-        mask = get_text_field_mask(tokens).float()
+        mask = get_text_field_mask(tokens)
 
         if self._seq2seq_encoder:
             embedded_text = self._seq2seq_encoder(embedded_text, mask=mask)
@@ -141,7 +141,9 @@ class BasicClassifier(Model):
         return output_dict
 
     @overrides
-    def decode(self, output_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def make_output_human_readable(
+        self, output_dict: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
         """
         Does a simple argmax over the probabilities, converts index to string label, and
         add `"label"` key to the dictionary with the result.

@@ -222,7 +222,7 @@ class BiattentiveClassificationNetwork(Model):
         loss : torch.FloatTensor, optional
             A scalar loss to be optimised.
         """
-        text_mask = util.get_text_field_mask(tokens).float()
+        text_mask = util.get_text_field_mask(tokens)
         # Pop elmo tokens, since elmo embedder should not be present.
         elmo_tokens = tokens.pop("elmo", None)
         if tokens:
@@ -312,7 +312,9 @@ class BiattentiveClassificationNetwork(Model):
         return output_dict
 
     @overrides
-    def decode(self, output_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def make_output_human_readable(
+        self, output_dict: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
         """
         Does a simple argmax over the class probabilities, converts indices to string labels, and
         adds a `"label"` key to the dictionary with the result.

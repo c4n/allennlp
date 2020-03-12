@@ -31,7 +31,7 @@
       "num_layers": 1,
       "bidirectional": true
     },
-    "similarity_function": {"type": "dot_product"},
+    "matrix_attention": {"type": "dot_product"},
     "projection_feedforward": {
       "input_dim": 200,
       "hidden_dims": 25,
@@ -69,11 +69,13 @@
        ]
      }
    },
-  "iterator": {
-    "type": "bucket",
-    "batch_size": 32,
-    "padding_noise": 0.0,
-  },
+   "data_loader": {
+    "batch_sampler": {
+        "type": "bucket",
+        "batch_size": 32,
+        "padding_noise": 0.0
+    }
+},
   "trainer": {
     "optimizer": {
         "type": "adam",

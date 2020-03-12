@@ -3,8 +3,6 @@ The `train` subcommand can be used to train a model.
 It requires a configuration file and a directory in
 which to write the results.
 
-.. code-block:: bash
-
    $ allennlp train --help
     usage: allennlp train [-h] -s SERIALIZATION_DIR [-r] [-f] [-o OVERRIDES]
                           [--file-friendly-logging] [--node-rank NODE_RANK]
@@ -41,7 +39,7 @@ which to write the results.
 import argparse
 import logging
 import os
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -53,7 +51,8 @@ from allennlp.common import Params, Registrable, Lazy
 from allennlp.common.checks import check_for_gpu, ConfigurationError
 from allennlp.common import util as common_util
 from allennlp.common.plugins import import_plugins
-from allennlp.data import DataIterator, DatasetReader, Instance, Vocabulary
+from allennlp.data import DatasetReader, Vocabulary
+from allennlp.data import DataLoader
 from allennlp.models.archival import archive_model, CONFIG_NAME
 from allennlp.models.model import _DEFAULT_WEIGHTS, Model
 from allennlp.training.trainer_base import TrainerBase
@@ -296,20 +295,23 @@ def train_model(
         )
 
         # Creating `Vocabulary` objects from workers could be problematic since
-        # the data iterators in each worker will yield only `rank` specific
+        # the data loaders in each worker will yield only `rank` specific
         # instances. Hence it is safe to construct the vocabulary and write it
         # to disk before initializing the distributed context. The workers will
         # load the vocabulary from the path specified.
-        if params.get("vocabulary", Params({})).get("type", "") != "from_files":
+        vocab_dir = os.path.join(serialization_dir, "vocabulary")
+        if recover:
+            vocab = Vocabulary.from_files(vocab_dir)
+        else:
             vocab = training_util.make_vocab_from_params(
                 params.duplicate(), serialization_dir, print_statistics=dry_run
             )
-            params["vocabulary"] = {
-                "type": "from_files",
-                "directory": os.path.join(serialization_dir, "vocabulary"),
-                "padding_token": vocab._padding_token,
-                "oov_token": vocab._oov_token,
-            }
+        params["vocabulary"] = {
+            "type": "from_files",
+            "directory": vocab_dir,
+            "padding_token": vocab._padding_token,
+            "oov_token": vocab._oov_token,
+        }
 
         mp.spawn(
             _train_worker,
@@ -504,16 +506,14 @@ class TrainModel(Registrable):
         serialization_dir: str,
         model: Model,
         trainer: TrainerBase,
-        evaluation_dataset: Iterable[Instance] = None,
-        evaluation_iterator: DataIterator = None,
+        evaluation_data_loader: DataLoader = None,
         evaluate_on_test: bool = False,
         batch_weight_key: str = "",
     ) -> None:
         self.serialization_dir = serialization_dir
         self.model = model
         self.trainer = trainer
-        self.evaluation_dataset = evaluation_dataset
-        self.evaluation_iterator = evaluation_iterator
+        self.evaluation_data_loader = evaluation_data_loader
         self.evaluate_on_test = evaluate_on_test
         self.batch_weight_key = batch_weight_key
 
@@ -521,19 +521,18 @@ class TrainModel(Registrable):
         return self.trainer.train()
 
     def finish(self, metrics: Dict[str, Any]):
-        if self.evaluation_dataset and self.evaluate_on_test:
+        if self.evaluation_data_loader and self.evaluate_on_test:
             logger.info("The model will be evaluated using the best epoch weights.")
             test_metrics = training_util.evaluate(
                 self.model,
-                self.evaluation_dataset,
-                self.evaluation_iterator,
+                self.evaluation_data_loader,
                 cuda_device=self.trainer.cuda_device,
                 batch_weight_key=self.batch_weight_key,
             )
 
             for key, value in test_metrics.items():
                 metrics["test_" + key] = value
-        elif self.evaluation_dataset:
+        elif self.evaluation_data_loader:
             logger.info(
                 "To evaluate on the test set after training, pass the "
                 "'evaluate_on_test' flag, or use the 'allennlp evaluate' command."
@@ -551,13 +550,13 @@ class TrainModel(Registrable):
         dataset_reader: DatasetReader,
         train_data_path: str,
         model: Lazy[Model],
-        iterator: DataIterator,
+        data_loader: Lazy[DataLoader],
         trainer: Lazy[TrainerBase],
         vocabulary: Lazy[Vocabulary] = None,
         datasets_for_vocab_creation: List[str] = None,
         validation_dataset_reader: DatasetReader = None,
         validation_data_path: str = None,
-        validation_iterator: DataIterator = None,
+        validation_data_loader: Lazy[DataLoader] = None,
         test_data_path: str = None,
         evaluate_on_test: bool = False,
     ) -> "TrainModel":
@@ -595,9 +594,9 @@ class TrainModel(Registrable):
         model: `Lazy[Model]`
             The model that we will train.  This is lazy because it depends on the `Vocabulary`;
             after constructing the vocabulary we call `model.construct(vocab=vocabulary)`.
-        iterator: `DataIterator`
-            The iterator we use to batch instances from the dataset reader at training and (by
-            default) validation time.
+        data_loader: `Lazy[DataLoader]`
+            The data_loader we use to batch instances from the dataset reader at training and (by
+            default) validation time. This is lazy because it takes a dataset in it's constructor.
         trainer: `Lazy[TrainerBase]`
             The `Trainer` that actually implements the training loop.  This is a lazy object because
             it depends on the model that's going to be trained.
@@ -614,9 +613,9 @@ class TrainModel(Registrable):
             `dataset_reader`.
         validation_data_path: `str`, optional (default=None)
             If given, we will use this data for computing validation metrics and early stopping.
-        validation_iterator: `DataIterator`, optional (default=None)
-            If given, we will use this iterator for batching and scheduling instances for the
-            validation data, instead of `iterator`.
+        validation_data_loader: `Lazy[DataLoader]`, optional (default=None)
+            If given, the data_loader we use to batch instances from the dataset reader at
+            validation and test time. This is lazy because it takes a dataset in it's constructor.
         test_data_path: `str`, optional (default=None)
             If given, we will use this as test data.  This makes it available for vocab creation by
             default, but nothing else.
@@ -658,27 +657,42 @@ class TrainModel(Registrable):
             vocabulary_path = os.path.join(serialization_dir, "vocabulary")
             vocabulary_.save_to_files(vocabulary_path)
 
-        iterator.index_with(model_.vocab)
-        validation_iterator = validation_iterator or iterator
-        validation_iterator.index_with(model_.vocab)  # it is ok to call this twice
+        for dataset in datasets.values():
+            dataset.index_with(model_.vocab)
+
+        data_loader_ = data_loader.construct(dataset=datasets["train"])
+        validation_data = datasets.get("validation")
+        if validation_data is not None:
+            # Because of the way Lazy[T] works, we can't check it's existence
+            # _before_ we've tried to construct it. It returns None if it is not
+            # present, so we try to construct it first, and then afterward back off
+            # to the data_loader configuration used for training if it returns None.
+            validation_data_loader_ = validation_data_loader.construct(dataset=validation_data)
+            if validation_data_loader_ is None:
+                validation_data_loader_ = data_loader.construct(dataset=validation_data)
+        else:
+            validation_data_loader_ = None
+
+        test_data = datasets.get("test")
+        if test_data is not None:
+            test_data_loader = validation_data_loader.construct(dataset=test_data)
+            if test_data_loader is None:
+                test_data_loader = data_loader.construct(dataset=test_data)
+        else:
+            test_data_loader = None
 
         # We don't need to pass serialization_dir and local_rank here, because they will have been
         # passed through the trainer by from_params already, because they were keyword arguments to
         # construct this class in the first place.
         trainer_ = trainer.construct(
-            model=model_,
-            iterator=iterator,
-            train_data=datasets["train"],
-            validation_iterator=validation_iterator,
-            validation_data=datasets.get("validation"),
+            model=model_, data_loader=data_loader_, validation_data_loader=validation_data_loader_,
         )
 
         return cls(
             serialization_dir=serialization_dir,
             model=model_,
             trainer=trainer_,
-            evaluation_dataset=datasets.get("test"),
-            evaluation_iterator=validation_iterator,
+            evaluation_data_loader=test_data_loader,
             evaluate_on_test=evaluate_on_test,
             batch_weight_key=batch_weight_key,
         )

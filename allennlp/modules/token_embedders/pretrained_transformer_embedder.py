@@ -5,6 +5,7 @@ from overrides import overrides
 
 import torch
 import torch.nn.functional as F
+from transformers import XLNetConfig
 from transformers.modeling_auto import AutoModel
 
 from allennlp.data.tokenizers import PretrainedTransformerTokenizer
@@ -48,7 +49,9 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
 
     def _number_of_token_type_embeddings(self):
         config = self.transformer_model.config
-        if hasattr(config, "type_vocab_size"):
+        if isinstance(config, XLNetConfig):
+            return 2  # XLNet has hardcoded 2
+        elif hasattr(config, "type_vocab_size"):
             return config.type_vocab_size
         else:
             return 0
@@ -57,9 +60,9 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
     def forward(
         self,
         token_ids: torch.LongTensor,
-        mask: torch.LongTensor,
+        mask: torch.BoolTensor,
         type_ids: Optional[torch.LongTensor] = None,
-        segment_concat_mask: Optional[torch.LongTensor] = None,
+        segment_concat_mask: Optional[torch.BoolTensor] = None,
     ) -> torch.Tensor:  # type: ignore
         """
         # Parameters
@@ -70,13 +73,13 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
             ].
             num_segment_concat_wordpieces is num_wordpieces plus special tokens inserted in the
             middle, e.g. the length of: "[CLS] A B C [SEP] [CLS] D E F [SEP]" (see indexer logic).
-        mask: torch.LongTensor
+        mask: torch.BoolTensor
             Shape: [batch_size, num_wordpieces].
         type_ids: Optional[torch.LongTensor]
             Shape: [
                 batch_size, num_wordpieces if max_length is None else num_segment_concat_wordpieces
             ].
-        segment_concat_mask: Optional[torch.LongTensor]
+        segment_concat_mask: Optional[torch.BoolTensor]
             Shape: [batch_size, num_segment_concat_wordpieces].
 
         # Returns:
@@ -96,7 +99,8 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
                     raise ValueError("Found type ids too large for the chosen transformer model.")
                 assert token_ids.shape == type_ids.shape
 
-        if self._max_length is not None:
+        fold_long_sequences = self._max_length is not None and token_ids.size(1) > self._max_length
+        if fold_long_sequences:
             batch_size, num_segment_concat_wordpieces = token_ids.size()
             token_ids, segment_concat_mask, type_ids = self._fold_long_sequences(
                 token_ids, segment_concat_mask, type_ids
@@ -109,12 +113,13 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
 
         # We call this with kwargs because some of the huggingface models don't have the token_type_ids parameter
         # and fail even when it's given as None.
-        parameters = {"input_ids": token_ids, "attention_mask": transformer_mask}
+        # Also, as of transformers v2.5.1, they are taking FloatTensor masks.
+        parameters = {"input_ids": token_ids, "attention_mask": transformer_mask.float()}
         if type_ids is not None:
             parameters["token_type_ids"] = type_ids
         embeddings = self.transformer_model(**parameters)[0]
 
-        if self._max_length is not None:
+        if fold_long_sequences:
             embeddings = self._unfold_long_sequences(
                 embeddings, segment_concat_mask, batch_size, num_segment_concat_wordpieces
             )
@@ -124,7 +129,7 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
     def _fold_long_sequences(
         self,
         token_ids: torch.LongTensor,
-        mask: torch.LongTensor,
+        mask: torch.BoolTensor,
         type_ids: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.LongTensor, torch.LongTensor, Optional[torch.LongTensor]]:
         """
@@ -141,7 +146,7 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
             Shape: [batch_size, num_segment_concat_wordpieces].
             num_segment_concat_wordpieces is num_wordpieces plus special tokens inserted in the
             middle, i.e. the length of: "[CLS] A B C [SEP] [CLS] D E F [SEP]" (see indexer logic).
-        mask: `torch.LongTensor`
+        mask: `torch.BoolTensor`
             Shape: [batch_size, num_segment_concat_wordpieces].
             The mask for the concatenated segments of wordpieces. The same as `segment_concat_mask`
             in `forward()`.
@@ -152,7 +157,7 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
 
         token_ids: `torch.LongTensor`
             Shape: [batch_size * num_segments, self._max_length].
-        mask: `torch.LongTensor`
+        mask: `torch.BoolTensor`
             Shape: [batch_size * num_segments, self._max_length].
         """
         num_segment_concat_wordpieces = token_ids.size(1)
@@ -171,7 +176,7 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
     def _unfold_long_sequences(
         self,
         embeddings: torch.FloatTensor,
-        mask: torch.LongTensor,
+        mask: torch.BoolTensor,
         batch_size: int,
         num_segment_concat_wordpieces: int,
     ) -> torch.FloatTensor:
@@ -189,7 +194,7 @@ class PretrainedTransformerEmbedder(TokenEmbedder):
 
         embeddings: `torch.FloatTensor`
             Shape: [batch_size * num_segments, self._max_length, embedding_size].
-        mask: `torch.LongTensor`
+        mask: `torch.BoolTensor`
             Shape: [batch_size * num_segments, self._max_length].
             The mask for the concatenated segments of wordpieces. The same as `segment_concat_mask`
             in `forward()`.

@@ -203,7 +203,7 @@ class SpanConstituencyParser(Model):
         mask = get_text_field_mask(tokens)
         # Looking at the span start index is enough to know if
         # this is padding or not. Shape: (batch_size, num_spans)
-        span_mask = (spans[:, :, 0] >= 0).squeeze(-1).long()
+        span_mask = (spans[:, :, 0] >= 0).squeeze(-1)
         if span_mask.dim() == 1:
             # This happens if you use batch_size 1 and encounter
             # a length 1 sentence in PTB, which do exist. -.-
@@ -254,7 +254,9 @@ class SpanConstituencyParser(Model):
         return output_dict
 
     @overrides
-    def decode(self, output_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def make_output_human_readable(
+        self, output_dict: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
         """
         Constructs an NLTK `Tree` given the scored spans. We also switch to exclusive
         span ends when constructing the tree representation, because it makes indexing
