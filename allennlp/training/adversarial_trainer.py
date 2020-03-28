@@ -2,21 +2,28 @@ import datetime
 import logging
 import math
 import os
+import re
 import time
 import traceback
-from typing import Dict, Optional, Tuple, Union, Iterable, Any, List
+from typing import Dict, List, Optional, Tuple, Union, Any
 
+try:
+    from apex import amp
+except ImportError:
+    amp = None
 import torch
 import torch.distributed as dist
 import torch.optim.lr_scheduler
 from torch.nn.parallel import DistributedDataParallel
 
-from allennlp.common import Params, Lazy
-from allennlp.common.checks import ConfigurationError, parse_cuda_device, check_for_gpu
-from allennlp.common.tqdm import Tqdm
-from allennlp.common.util import dump_metrics, gpu_memory_mb, peak_memory_mb, lazy_groups_of
-from allennlp.data.instance import Instance
-# from allennlp.data.iterators.data_iterator import DataIterator, TensorDict
+
+from allennlp.common import Lazy, Tqdm
+from allennlp.common.checks import ConfigurationError, check_for_gpu
+from allennlp.common import util as common_util
+
+from allennlp.data import DataLoader
+
+from allennlp.data.dataloader import TensorDict
 from allennlp.models.model import Model
 from allennlp.nn import util as nn_util
 from allennlp.training import util as training_util
@@ -27,10 +34,10 @@ from allennlp.training.momentum_schedulers import MomentumScheduler
 from allennlp.training.moving_average import MovingAverage
 from allennlp.training.optimizers import Optimizer
 from allennlp.training.tensorboard_writer import TensorboardWriter
-
+from allennlp.training.trainer_base import TrainerBase
 
 ###my additions
-from allennlp.training.trainer_base import TrainerBase
+from allennlp.data.dataset_readers.dataset_reader import AllennlpDataset
 from allennlp.interpret.attackers.attacker import Attacker
 from allennlp.predictors.sentence_tagger import SentenceTaggerPredictor
 from allennlp.data import DatasetReader, Instance
@@ -48,14 +55,10 @@ class AdversarialTrainer(TrainerBase):
         self,
         model: Model,
         optimizer: torch.optim.Optimizer,
-        iterator: DataIterator,
-        dataset_reader : DatasetReader,
-        train_dataset: Iterable[Instance],
-        validation_dataset: Optional[Iterable[Instance]] = None,
+        data_loader: torch.utils.data.DataLoader,
         patience: Optional[int] = None,
         validation_metric: str = "-loss",
-        validation_iterator: DataIterator = None,
-        shuffle: bool = True,
+        validation_data_loader: torch.utils.data.DataLoader = None,
         num_epochs: int = 20,
         serialization_dir: Optional[str] = None,
         num_serialized_models_to_keep: int = 20,
@@ -74,11 +77,14 @@ class AdversarialTrainer(TrainerBase):
         log_batch_size_period: Optional[int] = None,
         moving_average: Optional[MovingAverage] = None,
         distributed: bool = False,
-        rank: int = 0,
+        local_rank: int = 0,
         world_size: int = 1,
         num_gradient_accumulation_steps: int = 1,
+        opt_level: Optional[str] = None,
+        #Adv only
+        dataset_reader : DatasetReader = None,
         attacker : Attacker = None,
-      
+        candidates: dict = None
     ) -> None:
         """
         A trainer for doing supervised learning. It just takes a labeled dataset
@@ -205,20 +211,21 @@ class AdversarialTrainer(TrainerBase):
             be useful to accommodate batches that are larger than the RAM size. Refer Thomas Wolf's
             [post](https://tinyurl.com/y5mv44fw) for details on Gradient Accumulation.
         """
-        super().__init__(serialization_dir, cuda_device, distributed, rank, world_size)
+        super().__init__(serialization_dir, cuda_device, distributed, local_rank, world_size)
 
         # I am not calling move_to_gpu here, because if the model is
         # not already on the GPU then the optimizer is going to be wrong.
         self.model = model
-        self.cuda_device = cuda_device
 
-        self.iterator = iterator
-        self._validation_iterator = validation_iterator
-        self.shuffle = shuffle
+        self.data_loader = data_loader
+        self._validation_data_loader = validation_data_loader
         self.optimizer = optimizer
-        self.train_data =  copy.deepcopy(train_dataset)
-        self.train_data_original = copy.deepcopy(train_dataset)
-        self._validation_data =  copy.deepcopy(validation_dataset)
+
+
+
+        self.train_data =  copy.deepcopy(data_loader.dataset)
+        self.train_data_original = copy.deepcopy(data_loader.dataset)
+        self._validation_data =  copy.deepcopy(validation_data_loader.dataset)
         
         ## additional stuffs for adv. attack
         self.attacker = attacker
@@ -227,10 +234,12 @@ class AdversarialTrainer(TrainerBase):
         
         self.adv_data = []
         self.attack_flag = False
+        
+        self.candidates = candidates
         #####
 
         if patience is None:  # no early stopping
-            if validation_dataset:
+            if validation_data_loader:
                 logger.warning(
                     "You provided a validation dataset but patience was set to None, "
                     "meaning that early stopping is disabled"
@@ -289,7 +298,7 @@ class AdversarialTrainer(TrainerBase):
             should_log_parameter_statistics=should_log_parameter_statistics,
             should_log_learning_rate=should_log_learning_rate,
         )
-
+        
         self._log_batch_size_period = log_batch_size_period
 
         self._last_log = 0.0  # time of last logging
@@ -299,6 +308,21 @@ class AdversarialTrainer(TrainerBase):
         # Enable activation logging.
         if histogram_interval is not None:
             self._tensorboard.enable_activation_logging(self.model)
+
+        # Enable automatic mixed precision training with NVIDIA Apex.
+        self._opt_level = opt_level
+        if self._opt_level is not None:
+            if amp is None:
+                raise ConfigurationError(
+                    (
+                        "Apex not installed but opt_level was provided. Please install NVIDIA's Apex to enable"
+                        " automatic mixed precision (AMP) training. See: https://github.com/NVIDIA/apex."
+                    )
+                )
+
+            self.model, self.optimizer = amp.initialize(
+                self.model, self.optimizer, opt_level=self._opt_level
+            )
 
         # Using `DistributedDataParallel`(ddp) brings in a quirk wrt AllenNLP's `Model` interface and its
         # usage. A `Model` object is wrapped by `ddp`, but assigning the wrapped model to `self.model`
@@ -314,13 +338,27 @@ class AdversarialTrainer(TrainerBase):
         else:
             self._pytorch_model = self.model
 
+            
     def rescale_gradients(self) -> Optional[float]:
-        return training_util.rescale_gradients(self.model, self._grad_norm)
+        """
+        Performs gradient rescaling. Is a no-op if gradient rescaling is not enabled.
+        """
+        if self._grad_norm:
+            if self._opt_level is not None:
+                # See: https://nvidia.github.io/apex/advanced.html#gradient-clipping
+                parameters_to_clip = [
+                    p for p in amp.master_params(self.optimizer) if p.grad is not None
+                ]
+            else:
+                parameters_to_clip = [p for p in self.model.parameters() if p.grad is not None]
+            return training_util.sparse_clip_norm(parameters_to_clip, self._grad_norm)
+        else:
+            return None
 
     def batch_loss(self, batch: TensorDict, for_training: bool) -> torch.Tensor:
         """
-        Does a forward pass on the given batches and returns the ``loss`` value in the result.
-        If ``for_training`` is `True` also applies regularization penalty.
+        Does a forward pass on the given batches and returns the `loss` value in the result.
+        If `for_training` is `True` also applies regularization penalty.
         """
         batch = nn_util.move_to_device(batch, self.cuda_device)
         output_dict = self._pytorch_model(**batch)
@@ -344,10 +382,10 @@ class AdversarialTrainer(TrainerBase):
         Trains one epoch and returns metrics.
         """
         logger.info("Epoch %d/%d", epoch, self._num_epochs - 1)
-        peak_cpu_usage = peak_memory_mb()
+        peak_cpu_usage = common_util.peak_memory_mb()
         logger.info(f"Peak CPU memory usage MB: {peak_cpu_usage}")
         gpu_usage = []
-        for gpu, memory in gpu_memory_mb().items():
+        for gpu, memory in common_util.gpu_memory_mb().items():
             gpu_usage.append((gpu, memory))
             logger.info(f"GPU {gpu} memory usage MB: {memory}")
 
@@ -356,12 +394,15 @@ class AdversarialTrainer(TrainerBase):
         self._pytorch_model.train()
 
         # Get tqdm for the training batches
-        batch_generator = self.iterator(self.train_data, num_epochs=1, shuffle=self.shuffle)
-        batch_group_generator = lazy_groups_of(
+        batch_generator = iter(self.data_loader)
+        batch_group_generator = common_util.lazy_groups_of(
             batch_generator, self._num_gradient_accumulation_steps
         )
+
+        logger.info("Training")
+
         num_training_batches = math.ceil(
-            self.iterator.get_num_batches(self.train_data) / self._num_gradient_accumulation_steps
+            len(self.data_loader) / self._num_gradient_accumulation_steps
         )
         # Having multiple tqdm bars in case of distributed training will be a mess. Hence only the master's
         # progress is shown
@@ -381,10 +422,28 @@ class AdversarialTrainer(TrainerBase):
 
         histogram_parameters = set(self.model.get_parameters_for_histogram_tensorboard_logging())
 
-        logger.info("Training")
-
         cumulative_batch_group_size = 0
+        done_early = False
         for batch_group in batch_group_generator_tqdm:
+            if self._distributed:
+                # Check whether the other workers have stopped already (due to differing amounts of
+                # data in each). If so, we can't proceed because we would hang when we hit the
+                # barrier implicit in Model.forward. We use a IntTensor instead a BoolTensor
+                # here because NCCL process groups apparently don't support BoolTensor.
+                done = torch.tensor(0, device=self.cuda_device)
+                torch.distributed.all_reduce(done, torch.distributed.ReduceOp.SUM)
+                if done.item() > 0:
+                    done_early = True
+                    logger.warning(
+                        f"Worker {torch.distributed.get_rank()} finishing training early! "
+                        "This implies that there is an imbalance in your training "
+                        "data across the workers and that some amount of it will be "
+                        "ignored. A small amount of this is fine, but a major imbalance "
+                        "should be avoided. Note: This warning will appear unless your "
+                        "data is perfectly balanced."
+                    )
+                    break
+
             batches_this_epoch += 1
             self._batch_num_total += 1
             batch_num_total = self._batch_num_total
@@ -396,7 +455,11 @@ class AdversarialTrainer(TrainerBase):
                 if torch.isnan(loss):
                     raise ValueError("nan loss encountered")
                 loss = loss / len(batch_group)
-                loss.backward()
+                if self._opt_level is not None:
+                    with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
                 train_loss += loss.item()
 
             batch_grad_norm = self.rescale_gradients()
@@ -426,10 +489,7 @@ class AdversarialTrainer(TrainerBase):
                     )
             else:
                 self.optimizer.step()
-                
-   
-            
-            #####orginal code####
+
             # Update moving averages
             if self._moving_average is not None:
                 self._moving_average.apply(batch_num_total)
@@ -480,6 +540,20 @@ class AdversarialTrainer(TrainerBase):
                 self._save_checkpoint(
                     "{0}.{1}".format(epoch, training_util.time_to_str(int(last_save_time)))
                 )
+        if self._distributed and not done_early:
+            logger.warning(
+                f"Worker {torch.distributed.get_rank()} completed its entire epoch (training)."
+            )
+            # Indicate that we're done so that any workers that have remaining data stop the epoch early.
+            done = torch.tensor(1, device=self.cuda_device)
+            torch.distributed.all_reduce(done, torch.distributed.ReduceOp.SUM)
+            assert done.item()
+
+        # Let all workers finish their epoch before computing
+        # the final statistics for the epoch.
+        if self._distributed:
+            dist.barrier()
+
         metrics = training_util.get_metrics(
             self.model,
             train_loss,
@@ -491,19 +565,18 @@ class AdversarialTrainer(TrainerBase):
         metrics["cpu_memory_MB"] = peak_cpu_usage
         for (gpu_num, memory) in gpu_usage:
             metrics["gpu_" + str(gpu_num) + "_memory_MB"] = memory
-
-            
         return metrics
+
     
     def _attack_epoch(self, epoch: int) -> Tuple[Dict[str, float], List[Instance]]:
         """
         Trains one epoch and returns metrics.
         """
         logger.info("Adversarial at Epoch %d/%d", epoch, self._num_epochs - 1)
-        peak_cpu_usage = peak_memory_mb()
+        peak_cpu_usage = common_util.peak_memory_mb()
         logger.info(f"Peak CPU memory usage MB: {peak_cpu_usage}")
         gpu_usage = []
-        for gpu, memory in gpu_memory_mb().items():
+        for gpu, memory in common_util.gpu_memory_mb().items():
             gpu_usage.append((gpu, memory))
             logger.info(f"GPU {gpu} memory usage MB: {memory}")
 
@@ -516,7 +589,7 @@ class AdversarialTrainer(TrainerBase):
         if self.attacker != None:
             #init
             tagger = SentenceTaggerPredictor(self.model, self.dataset_reader)
-            attacker = self.attacker(tagger, vocab_namespace="tokens")
+            attacker = self.attacker(tagger, self.candidates, vocab_namespace="tokens")
             #
             adv_data = []
 
@@ -524,7 +597,7 @@ class AdversarialTrainer(TrainerBase):
             dataset_tqdm = Tqdm.tqdm(self.train_data_original)
             for sample in dataset_tqdm:
                 #attack the model
-                if random.uniform(0, 1) < 0.5:
+                if random.uniform(0, 1) < 0.2:
                     new_sample  = copy.deepcopy(sample) #make sure there's no reference to the original sample
                     attack = attacker.attack_from_instance(sample)
                     adversarial_tokens = [Token(word) for word in attack['final'][0]]
@@ -538,7 +611,9 @@ class AdversarialTrainer(TrainerBase):
 #                     new_sample  = copy.deepcopy(sample) #make sure there's no reference to the original sample
 #                     adv_data.append(new_sample)
             ##eval attack###
-            adv_results = training_util.evaluate(self.model, adv_data, self.iterator, self.cuda_device, None )
+            adv_dataset = AllennlpDataset(adv_data, self.model.vocab)
+            adv_results = training_util.evaluate(self.model, DataLoader(adv_dataset, batch_size=64), self.cuda_device, None )
+  
             adv_results = dict(("adv_"+k,f(v) if hasattr(v,'keys') else v) for k,v in adv_results.items())
             ##attack##
             
@@ -547,7 +622,7 @@ class AdversarialTrainer(TrainerBase):
                 for k,v in adv_results.items():
                     self._tensorboard.add_train_scalar(k,v)
 
-        return adv_results, adv_data    
+        return adv_results, adv_dataset    
 
     def _validation_loss(self) -> Tuple[float, int]:
         """
@@ -561,17 +636,36 @@ class AdversarialTrainer(TrainerBase):
         if self._moving_average is not None:
             self._moving_average.assign_average_value()
 
-        if self._validation_iterator is not None:
-            val_iterator = self._validation_iterator
+        if self._validation_data_loader is not None:
+            validation_data_loader = self._validation_data_loader
         else:
-            val_iterator = self.iterator
+            raise ConfigurationError(
+                "Validation results cannot be calculated without a validation_data_loader"
+            )
 
-        val_generator = val_iterator(self._validation_data, num_epochs=1, shuffle=False)
-        num_validation_batches = val_iterator.get_num_batches(self._validation_data)
-        val_generator_tqdm = Tqdm.tqdm(val_generator, total=num_validation_batches)
+        val_generator_tqdm = Tqdm.tqdm(validation_data_loader)
         batches_this_epoch = 0
         val_loss = 0
+        done_early = False
         for batch in val_generator_tqdm:
+            if self._distributed:
+                # Check whether the other workers have stopped already (due to differing amounts of
+                # data in each). If so, we can't proceed because we would hang when we hit the
+                # barrier implicit in Model.forward. We use a IntTensor instead a BoolTensor
+                # here because NCCL process groups apparently don't support BoolTensor.
+                done = torch.tensor(0, device=self.cuda_device)
+                torch.distributed.all_reduce(done, torch.distributed.ReduceOp.SUM)
+                if done.item() > 0:
+                    done_early = True
+                    logger.warning(
+                        f"Worker {torch.distributed.get_rank()} finishing validation early! "
+                        "This implies that there is an imbalance in your validation "
+                        "data across the workers and that some amount of it will be "
+                        "ignored. A small amount of this is fine, but a major imbalance "
+                        "should be avoided. Note: This warning will appear unless your "
+                        "data is perfectly balanced."
+                    )
+                    break
 
             loss = self.batch_loss(batch, for_training=False)
             if loss is not None:
@@ -593,6 +687,15 @@ class AdversarialTrainer(TrainerBase):
             )
             description = training_util.description_from_metrics(val_metrics)
             val_generator_tqdm.set_description(description, refresh=False)
+
+        if self._distributed and not done_early:
+            logger.warning(
+                f"Worker {torch.distributed.get_rank()} completed its entire epoch (validation)."
+            )
+            # Indicate that we're done so that any workers that have remaining data stop validation early.
+            done = torch.tensor(1, device=self.cuda_device)
+            torch.distributed.all_reduce(done, torch.distributed.ReduceOp.SUM)
+            assert done.item()
 
         # Now restore the original parameter values.
         if self._moving_average is not None:
@@ -637,7 +740,7 @@ class AdversarialTrainer(TrainerBase):
             adv_out, self.adv_data = self._attack_epoch(epoch)
             adv_metrics.update(adv_out)
             self.train_data =self.train_data_original+copy.deepcopy(self.adv_data)
-                      
+            self.data_loader = DataLoader(self.train_data , batch_size = self.data_loader.batch_size)         
             
             # get peak of memory usage
             if "cpu_memory_MB" in train_metrics:
@@ -709,7 +812,7 @@ class AdversarialTrainer(TrainerBase):
                 self._metric_tracker.best_epoch_metrics = val_metrics
 
             if self._serialization_dir and self._master:
-                dump_metrics(
+                common_util.dump_metrics(
                     os.path.join(self._serialization_dir, f"metrics_epoch_{epoch}.json"), metrics
                 )
 
@@ -797,9 +900,9 @@ class AdversarialTrainer(TrainerBase):
         from model parameters. This function should only be used to continue training -
         if you wish to load a model for inference/load parts of a model into a new
         computation graph, you should use the native Pytorch functions:
-        `` model.load_state_dict(torch.load("/path/to/model/weights.th"))``
+        ` model.load_state_dict(torch.load("/path/to/model/weights.th"))`
 
-        If ``self._serialization_dir`` does not exist or does not contain any checkpointed weights,
+        If `self._serialization_dir` does not exist or does not contain any checkpointed weights,
         this function will do nothing and return 0.
 
         # Returns
@@ -825,10 +928,10 @@ class AdversarialTrainer(TrainerBase):
             self._momentum_scheduler.load_state_dict(training_state["momentum_scheduler"])
         training_util.move_optimizer_to_cuda(self.optimizer)
 
-        # Currently the ``training_state`` contains a serialized ``MetricTracker``.
+        # Currently the `training_state` contains a serialized `MetricTracker`.
         if "metric_tracker" in training_state:
             self._metric_tracker.load_state_dict(training_state["metric_tracker"])
-        # It used to be the case that we tracked ``val_metric_per_epoch``.
+        # It used to be the case that we tracked `val_metric_per_epoch`.
         elif "val_metric_per_epoch" in training_state:
             self._metric_tracker.clear()
             self._metric_tracker.add_metrics(training_state["val_metric_per_epoch"])
@@ -849,180 +952,83 @@ class AdversarialTrainer(TrainerBase):
 
         return epoch_to_return
 
-    # Requires custom from_params.
+
     @classmethod
-    def from_params(  # type: ignore
+    def from_partial_objects(
         cls,
         model: Model,
         serialization_dir: str,
-        iterator: DataIterator,
-        dataset_reader : DatasetReader,
-        train_data: Iterable[Instance],
-        validation_data: Optional[Iterable[Instance]],
-        params: Params,
-        validation_iterator: DataIterator = None,
+        data_loader: DataLoader,
+        validation_data_loader: DataLoader = None,
         local_rank: int = 0,
-    ) -> "Trainer":
-
-        patience = params.pop_int("patience", None)
-        validation_metric = params.pop("validation_metric", "-loss")
-        shuffle = params.pop_bool("shuffle", True)
-        num_epochs = params.pop_int("num_epochs", 20)
-        cuda_device = parse_cuda_device(params.pop("cuda_device", -1))
-        grad_norm = params.pop_float("grad_norm", None)
-        grad_clipping = params.pop_float("grad_clipping", None)
-        lr_scheduler_params = params.pop("learning_rate_scheduler", None)
-        momentum_scheduler_params = params.pop("momentum_scheduler", None)
+        patience: int = None,
+        validation_metric: str = "-loss",
+        num_epochs: int = 20,
+        cuda_device: int = -1,
+        grad_norm: float = None,
+        grad_clipping: float = None,
+        model_save_interval: float = None,
+        summary_interval: int = 100,
+        histogram_interval: int = None,
+        should_log_parameter_statistics: bool = True,
+        should_log_learning_rate: bool = False,
+        log_batch_size_period: int = None,
+        distributed: bool = None,
+        world_size: int = 1,
+        num_gradient_accumulation_steps: int = 1,
+        opt_level: Optional[str] = None,
+        no_grad: List[str] = None,
+        optimizer: Lazy[Optimizer] = None,
+        learning_rate_scheduler: Lazy[LearningRateScheduler] = None,
+        momentum_scheduler: Lazy[MomentumScheduler] = None,
+        moving_average: Lazy[MovingAverage] = None,
+        checkpointer: Lazy[Checkpointer] = None,
+        #Adv
+        dataset_reader : DatasetReader = None,
+        attacker : Attacker = None,
+        candidates : dict = None
+    ) -> "AdversarialTrainer":
         
-        ###READER to edit to make it more customizable
-
         check_for_gpu(cuda_device)
         if cuda_device >= 0:
             # Moving model to GPU here so that the optimizer state gets constructed on
             # the right device.
             model = model.cuda(cuda_device)
 
+        if no_grad:
+            for name, parameter in model.named_parameters():
+                if any(re.search(regex, name) for regex in no_grad):
+                    parameter.requires_grad_(False)
+
+        common_util.log_frozen_and_tunable_parameter_names(model)
+
         parameters = [[n, p] for n, p in model.named_parameters() if p.requires_grad]
-        optimizer = Optimizer.from_params(model_parameters=parameters, params=params.pop("optimizer"))
-        if "moving_average" in params:
-            moving_average = MovingAverage.from_params(
-                params.pop("moving_average"), parameters=parameters
-            )
-        else:
-            moving_average = None
+        optimizer_ = optimizer.construct(model_parameters=parameters)
+        if not optimizer_:
+            optimizer_ = Optimizer.default(parameters)
 
-        if lr_scheduler_params:
-            lr_scheduler = LearningRateScheduler.from_params(optimizer, lr_scheduler_params)
-        else:
-            lr_scheduler = None
-        if momentum_scheduler_params:
-            momentum_scheduler = MomentumScheduler.from_params(optimizer, momentum_scheduler_params)
-        else:
-            momentum_scheduler = None
+        try:
+            batches_per_epoch = len(data_loader)
+        except TypeError:
+            # If the dataset is lazy, it won't have a length.
+            batches_per_epoch = None
 
-        if "checkpointer" in params:
-            if (
-                "keep_serialized_model_every_num_seconds" in params
-                or "num_serialized_models_to_keep" in params
-            ):
-                raise ConfigurationError(
-                    "Checkpointer may be initialized either from the 'checkpointer' key or from the "
-                    "keys 'num_serialized_models_to_keep' and 'keep_serialized_model_every_num_seconds'"
-                    " but the passed config uses both methods."
-                )
-            checkpointer = Checkpointer.from_params(params.pop("checkpointer"))
-        else:
-            num_serialized_models_to_keep = params.pop_int("num_serialized_models_to_keep", 20)
-            keep_serialized_model_every_num_seconds = params.pop_int(
-                "keep_serialized_model_every_num_seconds", None
-            )
-            checkpointer = Checkpointer(
-                serialization_dir=serialization_dir,
-                num_serialized_models_to_keep=num_serialized_models_to_keep,
-                keep_serialized_model_every_num_seconds=keep_serialized_model_every_num_seconds,
-            )
-        model_save_interval = params.pop_float("model_save_interval", None)
-        summary_interval = params.pop_int("summary_interval", 100)
-        histogram_interval = params.pop_int("histogram_interval", None)
-        should_log_parameter_statistics = params.pop_bool("should_log_parameter_statistics", True)
-        should_log_learning_rate = params.pop_bool("should_log_learning_rate", False)
-        log_batch_size_period = params.pop_int("log_batch_size_period", None)
-
-        distributed = params.pop_bool("distributed", False)
-        world_size = params.pop_int("world_size", 1)
-        
-        attacker = params.pop("attacker", None)
-
-        num_gradient_accumulation_steps = params.pop("num_gradient_accumulation_steps", 1)
-
-        params.assert_empty(cls.__name__)
-        return cls(
-            model,
-            optimizer,
-            iterator,
-            dataset_reader,
-            train_data,
-            validation_data,
-            patience=patience,
-            validation_metric=validation_metric,
-            validation_iterator=validation_iterator,
-            shuffle=shuffle,
-            num_epochs=num_epochs,
-            serialization_dir=serialization_dir,
-            cuda_device=cuda_device,
-            grad_norm=grad_norm,
-            grad_clipping=grad_clipping,
-            learning_rate_scheduler=lr_scheduler,
-            momentum_scheduler=momentum_scheduler,
-            checkpointer=checkpointer,
-            model_save_interval=model_save_interval,
-            summary_interval=summary_interval,
-            histogram_interval=histogram_interval,
-            should_log_parameter_statistics=should_log_parameter_statistics,
-            should_log_learning_rate=should_log_learning_rate,
-            log_batch_size_period=log_batch_size_period,
-            moving_average=moving_average,
-            distributed=distributed,
-            rank=local_rank,
-            world_size=world_size,
-            num_gradient_accumulation_steps=num_gradient_accumulation_steps,
-            attacker=attacker,
+        moving_average_ = moving_average.construct(parameters=parameters)
+        learning_rate_scheduler_ = learning_rate_scheduler.construct(
+            optimizer=optimizer_, num_epochs=num_epochs, num_steps_per_epoch=batches_per_epoch
         )
+        momentum_scheduler_ = momentum_scheduler.construct(optimizer=optimizer_)
 
-    @classmethod
-    def from_partial_objects(
-        cls,
-        model: Model,
-        optimizer:  Lazy[Optimizer],
-        iterator: DataIterator,
-        dataset_reader : DatasetReader,
-        train_dataset: Iterable[Instance],
-        validation_dataset: Optional[Iterable[Instance]] = None,
-        patience: Optional[int] = None,
-        validation_metric: str = "-loss",
-        validation_iterator: DataIterator = None,
-        shuffle: bool = True,
-        num_epochs: int = 20,
-        serialization_dir: Optional[str] = None,
-        num_serialized_models_to_keep: int = 20,
-        keep_serialized_model_every_num_seconds: int = None,
-        checkpointer: Checkpointer = None,
-        model_save_interval: float = None,
-        cuda_device: int = -1,
-        grad_norm: Optional[float] = None,
-        grad_clipping: Optional[float] = None,
-        learning_rate_scheduler: Optional[LearningRateScheduler] = None,
-        momentum_scheduler: Optional[MomentumScheduler] = None,
-        summary_interval: int = 100,
-        histogram_interval: int = None,
-        should_log_parameter_statistics: bool = True,
-        should_log_learning_rate: bool = False,
-        log_batch_size_period: Optional[int] = None,
-        moving_average: Optional[MovingAverage] = None,
-        distributed: bool = False,
-        rank: int = 0,
-        world_size: int = 1,
-        num_gradient_accumulation_steps: int = 1,
-        attacker : Attacker = None,
-    ) -> "AdversarialTrainer":
-        train_dataset = data_reader.read("")
-        validation_dataset = data_reader.read("")
-        
-        model_params = [[n, p] for n, p in model.named_parameters() if p.requires_grad]
-        optimizer = optimizer.construct(model_parameters=tagger_params)
-
-      
+        checkpointer_ = checkpointer.construct() or Checkpointer(serialization_dir)
+#         train_dataset = data_reader.read("")
+#         validation_dataset = data_reader.read("")
         return cls(
         model,
         optimizer,
-        iterator,
-        dataset_reader,
-        train_dataset,
-        validation_dataset,
+        data_loader,
         patience,
         validation_metric,
-        validation_iterator,
-        shuffle,
+        validation_data_loader,
         num_epochs,
         serialization_dir,
         num_serialized_models_to_keep,
@@ -1041,10 +1047,12 @@ class AdversarialTrainer(TrainerBase):
         log_batch_size_period,
         moving_average,
         distributed,
-        rank,
+        local_rank,
         world_size,
         num_gradient_accumulation_steps,
-        attacker
+        opt_level,
+        attacker,
+        candidates
         )
     
 

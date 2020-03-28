@@ -60,10 +60,11 @@ class MyHotflip(Attacker):
     """
 
     def __init__(
-        self, predictor: Predictor, vocab_namespace: str = "tokens", max_tokens: int = 5000
+        self, predictor: Predictor, candidates: dict,  vocab_namespace: str = "tokens", max_tokens: int = 5000
     ) -> None:
         super().__init__(predictor)
         self.vocab = self.predictor._model.vocab
+        self.candidates = candidates
         self.namespace = vocab_namespace
         # Force new tokens to be alphanumeric
         self.max_tokens = max_tokens
@@ -140,7 +141,8 @@ class MyHotflip(Attacker):
         # for both runtime and memory considerations.
 
         # repalce token with  bad token
-        all_tokens = self.add_char(word)
+#         all_tokens = self.add_char(word)
+        all_tokens = self.candidates[word][:100]
         #         max_index = self.vocab.get_token_index(all_tokens[-1], self.namespace)
         #         self.invalid_replacement_indices = [
         #             i for i in self.invalid_replacement_indices if i < max_index
@@ -180,14 +182,15 @@ class MyHotflip(Attacker):
                 elmo_tokens = []
                 for token in all_tokens:
                     elmo_indexed_token = token_indexer.tokens_to_indices(
-                        [Token(text=token)], self.vocab, "sentence"
-                    )["sentence"]
+                        [Token(text=token)], self.vocab
+                    )["tokens"]
                     elmo_tokens.append(elmo_indexed_token[0])
                 inputs[indexer_name] = {"tokens": torch.LongTensor(elmo_tokens).unsqueeze(0)}
             else:
                 raise RuntimeError("Unsupported token indexer:", token_indexer)
-
+                
         return util.move_to_device(inputs, self.cuda_device)
+    
     def attack_from_instance(
         self,
         input_instance: Instance,
@@ -361,24 +364,25 @@ class MyHotflip(Attacker):
 
             # TODO(mattg): taking the first result here seems brittle, if we're in a case where
             # there are multiple predictions.
-            adv_labeled_instances = self.predictor.predictions_to_labeled_instances(
-                instance, outputs
-            )
+            ###Commented out: so that hotflip will flip all possible words that met the requirements
+#             adv_labeled_instances = self.predictor.predictions_to_labeled_instances(
+#                 instance, outputs
+#             )
             
-            # If we've met our stopping criterion, we stop.
-            for adv_labeled_instance in adv_labeled_instances:
-                has_changed = utils.instance_has_changed(adv_labeled_instance, fields_to_compare)
-                # quit if it does not change
-                if not has_changed:
-                    break
+#             # If we've met our stopping criterion, we stop.
+#             for adv_labeled_instance in adv_labeled_instances:
+#                 has_changed = utils.instance_has_changed(adv_labeled_instance, fields_to_compare)
+#                 # quit if it does not change
+#                 if not has_changed:
+#                     break
 
-            if target is None and has_changed:
-                # With no target, we just want to change the prediction.
-                break
-            if target is not None and not has_changed:
-                # With a given target, we want to *match* the target, which we check by
-                # `not has_changed`.
-                break
+#             if target is None and has_changed:
+#                 # With no target, we just want to change the prediction.
+#                 break
+#             if target is not None and not has_changed:
+#                 # With a given target, we want to *match* the target, which we check by
+#                 # `not has_changed`.
+#                 break
 
         final_tokens.append(text_field.tokens)
         #adversarial_list
@@ -628,9 +632,7 @@ class MyHotflip(Attacker):
             text_field.tokens[index_of_token_to_flip] = new_token
             instance.indexed = False
 
-
         final_tokens.append(text_field.tokens)
         #no output version for training only
         return sanitize({"final": final_tokens, "original": original_tokens})
 
-#         return sanitize({"final": final_tokens, "original": original_tokens, "outputs": outputs})

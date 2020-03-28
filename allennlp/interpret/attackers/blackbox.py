@@ -13,7 +13,7 @@ from allennlp.data.token_indexers import (
     SingleIdTokenIndexer,
 )
 from allennlp.data.tokenizers import Token
-from allennlp.interpret.attackers import utils
+from allennlp.interpret.attackers import utils, adv_utils
 from allennlp.interpret.attackers.attacker import Attacker
 from allennlp.data import Instance
 
@@ -31,9 +31,10 @@ class BlackBox(Attacker):
     """
     """
 
-    def __init__(self, predictor: Predictor, vocab_namespace: str = "tokens", max_tokens: int = 5000) -> None:
+    def __init__(self, predictor: Predictor, candidates: dict, vocab_namespace: str = "tokens", max_tokens: int = 5000) -> None:
         super().__init__(predictor)
         self.vocab = self.predictor._model.vocab
+        self.candidates = candidates
         self.namespace = vocab_namespace
         # Force new tokens to be alphanumeric
         self.max_tokens = max_tokens
@@ -73,12 +74,12 @@ class BlackBox(Attacker):
                 elmo_tokens = []
                 for token in all_tokens:
                     elmo_indexed_token = token_indexer.tokens_to_indices(
-                        [Token(text=token)], self.vocab, "sentence"
-                    )["sentence"]
+                        [Token(text=token)], self.vocab
+                    )["tokens"]
                     elmo_tokens.append(elmo_indexed_token[0])
                 inputs[indexer_name] = {"tokens": torch.LongTensor(elmo_tokens).unsqueeze(0)}
             else:
-                raise RuntimeError("Unsupported token indexer:", token_indexer)    
+                raise RuntimeError("Unsupported token indexer:", token_indexer) 
 
         return util.move_to_device(inputs, self.cuda_device)
                 
@@ -196,7 +197,7 @@ class BlackBox(Attacker):
                 flipped.append(index)
             else: 
                 # Get new token using taylor approximation.
-                new_word = random.choice(self.add_char(token.text))
+                new_word = random.choice(self.candidates[token.text])
                 # Flip token.  We need to tell the instance to re-index itself, so the text field
                 # will actually update.
                 new_token = Token(
@@ -275,18 +276,18 @@ class BlackBox(Attacker):
         instance = self.predictor._json_to_instance(inputs)
         return self.attack_from_instance(instance)
     
-    def add_char(self, w_original):
-        """
-        add letter in the middle of a word
-        """
-        word_list = []
-        if len(w_original) > 3:
-            for i in range(1, len(w_original)):
-                for char in CHARACTERS:
-                    w = copy(w_original)
-                    w = list(w)
-                    w[i] = char + w[i]
-                    word_list.append("".join(w))
-            return word_list
-        else:
-            return [w_original]
+#     def add_char(self, w_original):
+#         """
+#         add letter in the middle of a word
+#         """
+#         word_list = []
+#         if len(w_original) > 3:
+#             for i in range(1, len(w_original)):
+#                 for char in CHARACTERS:
+#                     w = copy(w_original)
+#                     w = list(w)
+#                     w[i] = char + w[i]
+#                     word_list.append("".join(w))
+#             return word_list
+#         else:
+#             return [w_original]

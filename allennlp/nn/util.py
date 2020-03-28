@@ -649,7 +649,7 @@ def get_token_ids_from_text_field_tensors(
     """
     for indexer_name, indexer_tensors in text_field_tensors.items():
         for argument_name, tensor in indexer_tensors.items():
-            if argument_name in ["tokens", "token_ids", "input_ids"]:
+            if argument_name in ["tokens", "token_ids", "input_ids"] and indexer_name != 'elmo':
                 return tensor
     raise NotImplementedError(
         "Our heuristic for guessing the right token ids failed. Please open an issue on "
