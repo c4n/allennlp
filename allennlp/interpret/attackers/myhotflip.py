@@ -142,7 +142,7 @@ class MyHotflip(Attacker):
 
         # repalce token with  bad token
 #         all_tokens = self.add_char(word)
-        all_tokens = self.candidates[word][:100]
+        all_tokens = self.candidates[word]
         #         max_index = self.vocab.get_token_index(all_tokens[-1], self.namespace)
         #         self.invalid_replacement_indices = [
         #             i for i in self.invalid_replacement_indices if i < max_index
@@ -354,13 +354,13 @@ class MyHotflip(Attacker):
 
             # Get model predictions on instance, and then label the instances
             ###NO OUTPUT VERSION FOR TRAINING ONLY
-            grads, outputs = self.predictor.get_gradients([instance])  # predictions
+#             grads, outputs = self.predictor.get_gradients([instance])  # predictions
 
-            for key, output in outputs.items():
-                if isinstance(output, torch.Tensor):
-                    outputs[key] = output.detach().cpu().numpy().squeeze()
-                elif isinstance(output, list):
-                    outputs[key] = output[0]
+#             for key, output in outputs.items():
+#                 if isinstance(output, torch.Tensor):
+#                     outputs[key] = output.detach().cpu().numpy().squeeze()
+#                 elif isinstance(output, list):
+#                     outputs[key] = output[0]
 
             # TODO(mattg): taking the first result here seems brittle, if we're in a case where
             # there are multiple predictions.
