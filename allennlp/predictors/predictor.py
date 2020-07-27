@@ -9,7 +9,8 @@ from torch import backends
 
 from allennlp.common import Registrable
 from allennlp.common.util import JsonDict, sanitize
-from allennlp.data import DatasetReader, Instance
+from allennlp.data import DatasetReader
+from allennlp.data.instance import Instance
 from allennlp.data.batch import Batch
 from allennlp.models import Model
 from allennlp.models.archival import Archive, load_archive

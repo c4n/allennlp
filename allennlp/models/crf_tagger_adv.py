@@ -12,7 +12,7 @@ from allennlp.modules.conditional_random_field import allowed_transitions
 from allennlp.models.model import Model
 from allennlp.nn import InitializerApplicator
 import allennlp.nn.util as util
-from allennlp.training.metrics import CategoricalAccuracy, SpanBasedF1Measure
+from allennlp.training.metrics import CategoricalAccuracy, SpanBasedF1Measure, FBetaMeasure
 
 
 @Model.register("crf_tagger_adv")
@@ -141,6 +141,10 @@ class CrfTaggerAdv(Model):
             self._f1_metric = SpanBasedF1Measure(
                 vocab, tag_namespace=label_namespace, label_encoding=label_encoding
             )
+        else:
+            self._f1_metric = FBetaMeasure(
+                average = 'micro'
+            )            
 
         check_dimensions_match(
             text_field_embedder.get_output_dim(),
@@ -161,6 +165,7 @@ class CrfTaggerAdv(Model):
     def forward(
         self,  # type: ignore
         tokens: TextFieldTensors,
+        adv_tokens: TextFieldTensors,
         tags: torch.LongTensor = None,
         metadata: List[Dict[str, Any]] = None,
         **kwargs,
@@ -197,27 +202,42 @@ class CrfTaggerAdv(Model):
         loss : `torch.FloatTensor`, optional
             A scalar loss to be optimised. Only computed if gold label `tags` are provided.
         """
+        #tokens1
         embedded_text_input = self.text_field_embedder(tokens)
         mask = util.get_text_field_mask(tokens)
-
+        #tokens2
+        adv_embedded_text_input = self.text_field_embedder(adv_tokens)
+        adv_mask = util.get_text_field_mask(adv_tokens)        
+        ####
         if self.dropout:
             embedded_text_input = self.dropout(embedded_text_input)
-
+            adv_embedded_text_input = self.dropout(adv_embedded_text_input)
+            
         encoded_text = self.encoder(embedded_text_input, mask)
+        adv_encoded_text = self.encoder(adv_embedded_text_input, adv_mask)
 
         if self.dropout:
             encoded_text = self.dropout(encoded_text)
+            adv_encoded_text = self.dropout(adv_encoded_text)
 
         if self._feedforward is not None:
             encoded_text = self._feedforward(encoded_text)
+            adv_encoded_text = self._feedforward(adv_encoded_text)
+
 
         logits = self.tag_projection_layer(encoded_text)
         best_paths = self.crf.viterbi_tags(logits, mask, top_k=self.top_k)
+        
+        adv_logits = self.tag_projection_layer(adv_encoded_text)
+        adv_best_paths = self.crf.viterbi_tags(adv_logits, adv_mask, top_k=self.top_k)
 
         # Just get the top tags and ignore the scores.
         predicted_tags = cast(List[List[int]], [x[0][0] for x in best_paths])
+        adv_predicted_tags = cast(List[List[int]], [x[0][0] for x in adv_best_paths])
 
-        output = {"logits": logits, "mask": mask, "tags": predicted_tags}
+        output = {"logits": logits, "mask": mask, "tags": predicted_tags,
+                 "adv_logits": adv_logits, "adv_mask": adv_mask, "adv_tags": adv_predicted_tags}
+        
 
         if self.top_k > 1:
             output["top_k_tags"] = best_paths
@@ -225,8 +245,9 @@ class CrfTaggerAdv(Model):
         if tags is not None:
             # Add negative log-likelihood as loss
             log_likelihood = self.crf(logits, tags, mask)
+            adv_log_likelihood = self.crf(adv_logits, tags, adv_mask)
 
-            output["loss"] = -log_likelihood
+            output["loss"] = -log_likelihood -adv_log_likelihood*0.2
 
             # Represent viterbi tags as "class probabilities" that we can
             # feed into the metrics
@@ -236,14 +257,14 @@ class CrfTaggerAdv(Model):
                     class_probabilities[i, j, tag_id] = 1
 
             for metric in self.metrics.values():
-                metric(class_probabilities, tags, mask.float())
-            if self.calculate_span_f1:
-                self._f1_metric(class_probabilities, tags, mask.float())
+                metric(class_probabilities, tags, mask)
+#             if self.calculate_span_f1:
+            self._f1_metric(class_probabilities, tags, mask)
         if metadata is not None:
             output["words"] = [x["words"] for x in metadata]
         return output
 
-    @overrides
+#     @overrides
     def decode(self, output_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
         Converts the tag ids to the actual tags.
@@ -275,10 +296,12 @@ class CrfTaggerAdv(Model):
             metric_name: metric.get_metric(reset) for metric_name, metric in self.metrics.items()
         }
 
-        if self.calculate_span_f1:
-            f1_dict = self._f1_metric.get_metric(reset=reset)
-            if self._verbose_metrics:
-                metrics_to_return.update(f1_dict)
-            else:
-                metrics_to_return.update({x: y for x, y in f1_dict.items() if "overall" in x})
+#         if self.calculate_span_f1:
+        f1_dict = self._f1_metric.get_metric(reset=reset)
+        if not self.calculate_span_f1:
+            f1_dict['f1-measure-overall'] = f1_dict.pop('fscore')
+        if self._verbose_metrics:
+            metrics_to_return.update(f1_dict)
+        else:
+            metrics_to_return.update({x: y for x, y in f1_dict.items() if "overall" in x})
         return metrics_to_return

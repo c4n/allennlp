@@ -1,5 +1,13 @@
 from copy import copy, deepcopy
-CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+consonant="กขฃคฅฆงจฉชซฌญฎฏฐฑฒณดตถทธนบปผฝพฟภมยรฤลฦวศษสหฬอฮ"
+front_vowel="เแโใไ"
+lower_vowel="อุอู".replace('อ','') #ทำแบบนี้จะได้อ่านออก
+rear_vowel = "าําๅๆะฯๅๆ"
+upper_vowel = "อ็อ้อ์อิอีอือึอํอัอ่อ๋อ๊".replace('อ','')
+tone = "อ้อ่อ๋อ๊".replace('อ','')
+
+CHARACTERS = consonant+front_vowel+lower_vowel+rear_vowel+upper_vowel+tone
 
 def add_char(w_original):
     """
@@ -63,13 +71,9 @@ def replace_char(w_original):
     else:
         return [w_original]
 
-def swap_case(w_original):
-    """
-    swap_lower and upper case
-    """
-    return  [''.join(c.lower() if c.isupper() else c.upper() for c in w_original)]
+
 
 def get_adversarial_candidates(w_original):
-    out=add_char(w_original)+del_char(w_original)+swap_char(w_original)+replace_char(w_original)+swap_case(w_original)
+    out=add_char(w_original)+del_char(w_original)+swap_char(w_original)+replace_char(w_original)
     return list(set(out))
 

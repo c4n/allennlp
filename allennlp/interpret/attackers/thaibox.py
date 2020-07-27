@@ -13,7 +13,7 @@ from allennlp.data.token_indexers import (
     SingleIdTokenIndexer,
 )
 from allennlp.data.tokenizers import Token
-from allennlp.interpret.attackers import utils, adv_utils
+from allennlp.interpret.attackers import utils, adv_utils_thai
 from allennlp.interpret.attackers.attacker import Attacker
 from allennlp.data import Instance
 
@@ -23,11 +23,18 @@ from allennlp.nn import util
 from allennlp.predictors.predictor import Predictor
 
 DEFAULT_IGNORE_TOKENS = ["@@NULL@@", ".", ",", ";", "!", "?", "[MASK]", "[SEP]", "[CLS]"]
-CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+consonant="กขฃคฅฆงจฉชซฌญฎฏฐฑฒณดตถทธนบปผฝพฟภมยรฤลฦวศษสหฬอฮ"
+front_vowel="เแโใไ"
+lower_vowel="อุอู".replace('อ','') #ทำแบบนี้จะได้อ่านออก
+rear_vowel = "าําๅๆะฯๅๆ"
+upper_vowel = "อ็อ้อ์อิอีอือึอํอัอ่อ๋อ๊".replace('อ','')
+tone = "อ้อ่อ๋อ๊".replace('อ','')
+
+CHARACTERS = consonant+front_vowel+lower_vowel+rear_vowel+upper_vowel+tone
 # note :
 # hotflip isalnum is used to exclude alphnumeric string
-@Attacker.register("blackbox")
-class BlackBox(Attacker):
+@Attacker.register("thaibox")
+class ThaiBox(Attacker):
     """
     """
 
@@ -126,12 +133,11 @@ class BlackBox(Attacker):
             else: 
                 # Get new token using taylor approximation.
 #                 new_word = random.choice(self.candidates[token.text])
-                perb_num = random.randrange(5) # 5 perb type in total
-                perb_fcn = [adv_utils.add_char,
-                            adv_utils.del_char,
-                            adv_utils.swap_char,
-                            adv_utils.replace_char,
-                            adv_utils.swap_case][perb_num]
+                perb_num = random.randrange(4) # 4 perb type in total
+                perb_fcn = [adv_utils_thai.add_char,
+                            adv_utils_thai.del_char,
+                            adv_utils_thai.swap_char,
+                            adv_utils_thai.replace_char][perb_num]
                 new_word = random.choice(perb_fcn(token.text))
                 
                 # Flip token.  We need to tell the instance to re-index itself, so the text field

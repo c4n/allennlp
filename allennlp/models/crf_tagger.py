@@ -12,7 +12,7 @@ from allennlp.modules.conditional_random_field import allowed_transitions
 from allennlp.models.model import Model
 from allennlp.nn import InitializerApplicator
 import allennlp.nn.util as util
-from allennlp.training.metrics import CategoricalAccuracy, SpanBasedF1Measure
+from allennlp.training.metrics import CategoricalAccuracy, SpanBasedF1Measure, FBetaMeasure
 
 
 @Model.register("crf_tagger")
@@ -141,6 +141,10 @@ class CrfTagger(Model):
             self._f1_metric = SpanBasedF1Measure(
                 vocab, tag_namespace=label_namespace, label_encoding=label_encoding
             )
+        else:
+            self._f1_metric = FBetaMeasure(
+                average = 'micro'
+            )            
 
         check_dimensions_match(
             text_field_embedder.get_output_dim(),
@@ -237,8 +241,8 @@ class CrfTagger(Model):
 
             for metric in self.metrics.values():
                 metric(class_probabilities, tags, mask)
-            if self.calculate_span_f1:
-                self._f1_metric(class_probabilities, tags, mask)
+#             if self.calculate_span_f1:
+            self._f1_metric(class_probabilities, tags, mask)
         if metadata is not None:
             output["words"] = [x["words"] for x in metadata]
         return output
@@ -277,10 +281,12 @@ class CrfTagger(Model):
             metric_name: metric.get_metric(reset) for metric_name, metric in self.metrics.items()
         }
 
-        if self.calculate_span_f1:
-            f1_dict = self._f1_metric.get_metric(reset=reset)
-            if self._verbose_metrics:
-                metrics_to_return.update(f1_dict)
-            else:
-                metrics_to_return.update({x: y for x, y in f1_dict.items() if "overall" in x})
+#         if self.calculate_span_f1:
+        f1_dict = self._f1_metric.get_metric(reset=reset)
+        if not self.calculate_span_f1:
+            f1_dict['f1-measure-overall'] = f1_dict.pop('fscore')
+        if self._verbose_metrics:
+            metrics_to_return.update(f1_dict)
+        else:
+            metrics_to_return.update({x: y for x, y in f1_dict.items() if "overall" in x})
         return metrics_to_return

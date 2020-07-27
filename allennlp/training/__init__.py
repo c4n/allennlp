@@ -1,4 +1,5 @@
 from allennlp.training.no_op_trainer import NoOpTrainer
 from allennlp.training.trainer import Trainer
 from allennlp.training.adversarial_trainer import AdversarialTrainer
+from allennlp.training.adversarial_trainer_2inputs import AdversarialTrainer2Inputs
 from allennlp.training.trainer_base import TrainerBase

@@ -143,8 +143,9 @@ class CrfTaggerViz(Model):
             )
         else:
             self._f1_metric = FBetaMeasure(
-                labels = []
+                average = 'micro'
             )            
+           
 
         check_dimensions_match(
             text_field_embedder.get_output_dim(),
@@ -241,11 +242,12 @@ class CrfTaggerViz(Model):
 
             for metric in self.metrics.values():
                 metric(class_probabilities, tags, mask)
-            if self.calculate_span_f1:
-                self._f1_metric(class_probabilities, tags, mask)
+#             if self.calculate_span_f1:
+            self._f1_metric(class_probabilities, tags, mask)
         if metadata is not None:
             output["words"] = [x["words"] for x in metadata]
         return output
+
 
     @overrides
     def make_output_human_readable(
@@ -281,10 +283,12 @@ class CrfTaggerViz(Model):
             metric_name: metric.get_metric(reset) for metric_name, metric in self.metrics.items()
         }
 
-        if self.calculate_span_f1:
-            f1_dict = self._f1_metric.get_metric(reset=reset)
-            if self._verbose_metrics:
-                metrics_to_return.update(f1_dict)
-            else:
-                metrics_to_return.update({x: y for x, y in f1_dict.items() if "overall" in x})
+#         if self.calculate_span_f1:
+        f1_dict = self._f1_metric.get_metric(reset=reset)
+        if not self.calculate_span_f1:
+            f1_dict['f1-measure-overall'] = f1_dict.pop('fscore')
+        if self._verbose_metrics:
+            metrics_to_return.update(f1_dict)
+        else:
+            metrics_to_return.update({x: y for x, y in f1_dict.items() if "overall" in x})
         return metrics_to_return

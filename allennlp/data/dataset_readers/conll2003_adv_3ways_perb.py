@@ -32,7 +32,7 @@ def _is_divider(line: str) -> bool:
             return False
 
 
-@DatasetReader.register("conll2003_adv_3ways")
+@DatasetReader.register("conll2003_adv_3ways_perb")
 class Conll2003Adv3WaysDatasetReader(DatasetReader):
     """
     Reads instances from a pretokenised file where each line is in the following format:

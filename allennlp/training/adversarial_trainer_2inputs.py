@@ -85,7 +85,7 @@ class AdversarialTrainer2Inputs(TrainerBase):
         dataset_reader : DatasetReader = None,
         attacker : Attacker = None,
         candidates: dict = None,
-        train_data_path: str = "/home/datamind/can/FinalProject/allennlp_tutorial/data/train.txt"
+        train_data_path: str = None
     ) -> None:
         """
         A trainer for doing supervised learning. It just takes a labeled dataset

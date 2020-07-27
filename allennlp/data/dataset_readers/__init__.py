@@ -8,8 +8,14 @@ and produce datasets in the formats required by specific models.
 
 
 from allennlp.data.dataset_readers.ccgbank import CcgBankDatasetReader
+from allennlp.data.dataset_readers.wnut16 import WNUT16DatasetReader
+from allennlp.data.dataset_readers.wnut16_adv_2ways import WNUT16Adv2WaysDatasetReader
+from allennlp.data.dataset_readers.wnut16_adv_3ways import WNUT16Adv3WaysDatasetReader
 from allennlp.data.dataset_readers.conll2003 import Conll2003DatasetReader
 from allennlp.data.dataset_readers.conll2003_adv import Conll2003AdvDatasetReader
+from allennlp.data.dataset_readers.conll2003_adv_2ways import Conll2003Adv2WaysDatasetReader
+from allennlp.data.dataset_readers.conll2003_adv_3ways import Conll2003Adv3WaysDatasetReader
+from allennlp.data.dataset_readers.conll2002 import Conll2002DatasetReader
 from allennlp.data.dataset_readers.conll2000 import Conll2000DatasetReader
 from allennlp.data.dataset_readers.ontonotes_ner import OntonotesNamedEntityRecognition
 from allennlp.data.dataset_readers.coreference_resolution import (
@@ -40,3 +46,7 @@ from allennlp.data.dataset_readers.simple_language_modeling import (
 from allennlp.data.dataset_readers.babi import BabiReader
 from allennlp.data.dataset_readers.copynet_seq2seq import CopyNetDatasetReader
 from allennlp.data.dataset_readers.text_classification_json import TextClassificationJsonReader
+
+from allennlp.data.dataset_readers.orchid import ORCHIDReader
+from allennlp.data.dataset_readers.orchid_2ways import ORCHID2WaysReader
+from allennlp.data.dataset_readers.orchid_3ways import ORCHID3WaysReader

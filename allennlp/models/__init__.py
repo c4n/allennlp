@@ -9,6 +9,10 @@ from allennlp.models.biattentive_classification_network import BiattentiveClassi
 from allennlp.models.constituency_parser import SpanConstituencyParser
 from allennlp.models.coreference_resolution.coref import CoreferenceResolver
 from allennlp.models.crf_tagger import CrfTagger
+from allennlp.models.crf_tagger_viz import CrfTaggerViz
+from allennlp.models.crf_tagger_adv import CrfTaggerAdv
+from allennlp.models.crf_tagger_adv_dual import CrfTaggerAdvDual
+from allennlp.models.crf_tagger_trip import CrfTaggerTrip
 from allennlp.models.decomposable_attention import DecomposableAttention
 from allennlp.models.encoder_decoders.composed_seq2seq import ComposedSeq2Seq
 from allennlp.models.encoder_decoders.simple_seq2seq import SimpleSeq2Seq

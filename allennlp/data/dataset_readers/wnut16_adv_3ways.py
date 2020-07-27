@@ -84,7 +84,7 @@ class WNUT16Adv3WaysDatasetReader(DatasetReader):
         token_indexers: Dict[str, TokenIndexer] = None,
         tag_label: str = "ner",
         feature_labels: Sequence[str] = (),
-        coding_scheme: str = "IOB1",
+        coding_scheme: str = "BIOUL",
         label_namespace: str = "labels",
         **kwargs,
     ) -> None:
